@@ -139,12 +139,15 @@ class ImageRepository:
         # Group by cast(created_at as Date)
         results = (
             self.db.query(
-                cast(ImageItem.created_at, Date).label("day"),
+                func.date(ImageItem.created_at).label("day"),
                 ImageItem.status,
                 func.count(ImageItem.id)
             )
             .filter(ImageItem.created_at >= since_date)
-            .group_by("day", ImageItem.status)
+            .group_by(
+                func.date(ImageItem.created_at),
+                ImageItem.status
+            )
             .order_by("day")
             .all()
         )
