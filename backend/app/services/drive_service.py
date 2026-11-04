@@ -1,4 +1,4 @@
-import os
+﻿import os
 import shutil
 import datetime
 import logging
@@ -92,7 +92,7 @@ class GoogleDriveService:
 
             # Generate synthetic Drive File ID and Shareable URL
             drive_id = f"gdrive_file_{image.uuid[:12]}"
-            drive_url = f"https://drive.google.com/file/d/{drive_id}/view?usp=sharing"
+            drive_url = f"https://drive.google.com/file/d/{drive_id}/view"
 
             image.drive_status = "COMPLETED"
             image.drive_file_id = drive_id
@@ -206,3 +206,4 @@ class GoogleDriveService:
             "synced": synced,
             "failed": failed
         }
+

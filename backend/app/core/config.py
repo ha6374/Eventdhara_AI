@@ -1,4 +1,4 @@
-import os
+﻿import os
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,9 +32,16 @@ class Settings(BaseSettings):
     AI_CONFIDENCE_THRESHOLD: float = 0.75
 
     # Google Drive Integration
-    GOOGLE_DRIVE_ROOT_FOLDER_NAME: str = "EventDhara Decoration Images"
-    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""
+    GOOGLE_DRIVE_ROOT_FOLDER_NAME: str = "EventDhara_decorations"
+    GOOGLE_DRIVE_ROOT_FOLDER_ID: str = "19BGF1jSqlilxTnEDuaZldYb2yp25yedJ"
 
+    GOOGLE_OAUTH_CLIENT_JSON: str = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "credentials.json")
+    )
+
+    GOOGLE_DRIVE_TOKEN_JSON: str = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "token.json")
+    )
     # CORS
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",

@@ -1,0 +1,76 @@
+import os
+from typing import List, Union
+from pydantic import AnyHttpUrl, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    APP_NAME: str = "EventDhara AI Data Operations Platform"
+    ENVIRONMENT: str = "development"
+    API_V1_STR: str = "/api/v1"
+    SECRET_KEY: str = "eventdhara-enterprise-secret-key-2026"
+
+    # PostgreSQL Database URL
+    DATABASE_URL: str = "postgresql+psycopg2://postgres:123456@localhost:5432/eventdhara_db"
+    SQL_ECHO: bool = False
+
+    # Storage Paths
+    STORAGE_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage"))
+    MAX_UPLOAD_SIZE_MB: int = 500
+
+    # Image Quality Check Thresholds
+    MIN_IMAGE_WIDTH: int = 800
+    MIN_IMAGE_HEIGHT: int = 600
+    MIN_FILE_SIZE_KB: int = 50
+    BLUR_THRESHOLD: float = 100.0  # Variance of the Laplacian
+    PHASH_THRESHOLD: int = 5       # Max Hamming distance for pHash duplicate match
+    WATERMARK_DETECTION: bool = False
+
+    # AI (Gemini) Settings
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    AI_CONFIDENCE_THRESHOLD: float = 0.75
+
+    # Google Drive Integration
+    GOOGLE_DRIVE_ROOT_FOLDER_NAME: str = "EventDhara_decorations"
+    GOOGLE_SERVICE_ACCOUNT_JSON: str = "./credentials.json"
+    GOOGLE_DRIVE_ROOT_FOLDER_ID: str = "19BGF1jSqlilxTnEDuaZldYb2yp25yedJ" 
+    # CORS
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+    @field_validator("STORAGE_ROOT", mode="before")
+    def resolve_storage_root(cls, v: str) -> str:
+        project_storage = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage"))
+        return project_storage
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, list):
+            return v
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
+
+    model_config = SettingsConfigDict(
+        env_file=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env")),
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+
+settings = Settings()
+
+# Ensure storage directories exist
+os.makedirs(settings.STORAGE_ROOT, exist_ok=True)
+for sub in ["uploads", "extracted", "processed", "approved", "rejected", "duplicates", "exports"]:
+    os.makedirs(os.path.join(settings.STORAGE_ROOT, sub), exist_ok=True)
