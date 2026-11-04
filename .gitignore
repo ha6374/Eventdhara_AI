@@ -52,4 +52,11 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
-*.db
+*.dbcredentials.json
+token.json
+.env
+.env.*
+!.env.example
+.venv/
+node_modules/
+__pycache__/
