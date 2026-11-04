@@ -9,6 +9,13 @@ logger = logging.getLogger("eventdhara.category_service")
 
 # Initial canonical category tree specified in project requirements
 INITIAL_CATEGORIES_DATA = {
+    "Wedding Decoration": [
+        "Mandap Decoration",
+        "Stage Decoration",
+        "Entry Gate",
+        "Varmala Stage",
+        "Floral Wedding Decor"
+    ],
     "Birthday Decoration": [
         "1st Birthday",
         "Romantic Birthday",
@@ -26,6 +33,41 @@ INITIAL_CATEGORIES_DATA = {
         "Superhero Theme",
         "Unicorn Theme"
     ],
+    "Engagement Decoration": [
+        "Floral Ring Backdrop",
+        "Pastel Theme",
+        "Romantic Ring Ceremony"
+    ],
+    "Haldi Decoration": [
+        "Yellow Marigold Setup",
+        "Haldi Floral Urli",
+        "Traditional Yellow Backdrop"
+    ],
+    "Mehndi Decoration": [
+        "Boho Mehndi Setup",
+        "Colorful Drapes",
+        "Floral Jhula Mehndi"
+    ],
+    "Reception Decoration": [
+        "Luxury Stage Setup",
+        "Candlelight Pathway",
+        "Grand Backdrop"
+    ],
+    "Stage Decoration": [
+        "Floral Backdrop Stage",
+        "Geometric LED Stage",
+        "Royal Theme Stage"
+    ],
+    "Mandap Decoration": [
+        "Dome Mandap",
+        "Floral Pillar Mandap",
+        "Open Air Mandap"
+    ],
+    "Corporate Events": [
+        "Conference Backdrop",
+        "Annual Gala Stage",
+        "Product Launch Setup"
+    ],
     "Baby Shower": [
         "Floral Baby Shower",
         "Pastel Color",
@@ -42,6 +84,10 @@ INITIAL_CATEGORIES_DATA = {
         "Baby Boy",
         "Baby Girl",
         "Floral Decor"
+    ],
+    "Other": [
+        "General Celebration",
+        "Custom Setup"
     ]
 }
 

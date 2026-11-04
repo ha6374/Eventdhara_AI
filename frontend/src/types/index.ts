@@ -124,10 +124,16 @@ export interface ImageMetadata {
   note?: string | null
   keywords: string[]
   tags: string[]
+  custom_fields?: Record<string, any> | null
   created_at: string
   updated_at: string
   image_filename?: string | null
+  original_filename?: string | null
   image_url?: string | null
+  photo?: string | null
+  category_name?: string | null
+  approval_status?: string | null
+  processing_status?: string | null
 }
 
 export interface DuplicateComparisonItem {
@@ -149,4 +155,64 @@ export interface SystemSettings {
   google_drive_configured: boolean
   storage_root: string
   environment: string
+}
+
+export interface DriveStatusResponse {
+  connected: boolean
+  status: string
+  email?: string
+  display_name?: string
+  photo_url?: string
+  drive_root?: string
+  root_folder_id?: string
+  root_folder_name?: string
+  storage_used_gb?: number
+  storage_limit_gb?: number | string
+  total_approved: number
+  synced_to_drive: number
+  pending_sync: number
+  failed_sync: number
+  message?: string
+}
+
+export interface DriveFolderItem {
+  id: string
+  name: string
+  modifiedTime?: string
+}
+
+export interface SheetsExportResponse {
+  success: boolean
+  status: string
+  sheet_id?: string
+  sheet_title?: string
+  sheet_url?: string
+  total_rows: number
+  message: string
+}
+
+export interface FeedbackItem {
+  id: number
+  image_id: number
+  original_filename: string
+  original_category?: string | null
+  predicted_category?: string | null
+  rejection_reason: string
+  custom_feedback?: string | null
+  insights?: string | null
+  created_at: string
+}
+
+export interface ModelEvaluation {
+  total_evaluated: number
+  approved_count: number
+  rejected_count: number
+  review_count: number
+  total_feedbacks: number
+  precision: number
+  recall: number
+  f1_score: number
+  accuracy: number
+  model_version: string
+  active_learning_status: string
 }

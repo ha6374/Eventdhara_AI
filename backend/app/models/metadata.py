@@ -18,6 +18,7 @@ class ImageMetadata(Base):
     note = Column(Text, nullable=True)
     keywords = Column(Text, nullable=True)   # JSON serialized list or comma-separated
     tags = Column(Text, nullable=True)       # JSON serialized list or comma-separated
+    custom_fields = Column(Text, nullable=True)  # JSON serialized dictionary of dynamic fields
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)

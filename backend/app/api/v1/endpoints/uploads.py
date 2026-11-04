@@ -167,7 +167,15 @@ async def upload_zip_stream(
     processed_items = []
 
     try:
+        if not zipfile.is_zipfile(zip_path):
+            raise zipfile.BadZipFile("Uploaded file header does not match ZIP format")
+
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            # Check for corrupted archive
+            bad_file = zip_ref.testzip()
+            if bad_file:
+                raise zipfile.BadZipFile(f"Corrupted entry encountered in ZIP: {bad_file}")
+
             members = zip_ref.infolist()
             batch.total_files = len(members)
             batch.status = "PROCESSING"
@@ -201,11 +209,14 @@ async def upload_zip_stream(
                     shutil.copyfileobj(source, target)
 
                 try:
+                    # Resolve category from explicit selection or internal ZIP directory hierarchy
+                    effective_cat_id = category_id or resolve_category_from_zip_path(db, member.filename)
+
                     processed_image = processor.process_image(
                         source_file_path=extracted_file_path,
                         original_filename=basename,
                         batch_id=batch_id,
-                        target_category_id=category_id
+                        target_category_id=effective_cat_id
                     )
                     valid_count += 1
                     resp = ImageResponse.model_validate(processed_image)
@@ -224,6 +235,12 @@ async def upload_zip_stream(
         batch.status = "COMPLETED"
         db.commit()
 
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
+        logger.error("Corrupted or invalid ZIP file: %s", e)
+        batch.status = "FAILED"
+        batch.error_message = f"Corrupted or invalid ZIP archive: {str(e)}"
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Corrupted or invalid ZIP archive: {str(e)}")
     except Exception as e:
         logger.error("Failed extracting ZIP file: %s", e)
         batch.status = "FAILED"

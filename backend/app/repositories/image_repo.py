@@ -234,3 +234,13 @@ class ImageRepository:
             "fastest_duration_ms": round(float(min_ms), 1),
             "slowest_duration_ms": round(float(max_ms), 1),
         }
+
+    def delete(self, image_id: int) -> bool:
+        item = self.get_by_id(image_id)
+        if not item:
+            return False
+        from app.services.category_storage import remove_image_from_storage
+        remove_image_from_storage(item)
+        self.db.delete(item)
+        self.db.commit()
+        return True

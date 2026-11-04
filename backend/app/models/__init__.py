@@ -4,6 +4,7 @@ from app.models.batch import UploadBatch
 from app.models.image import ImageItem
 from app.models.metadata import ImageMetadata
 from app.models.audit import AuditLog
+from app.models.feedback import RejectionFeedback, CategoryFeedbackInsight
 
 __all__ = [
     "Base",
@@ -11,5 +12,7 @@ __all__ = [
     "UploadBatch",
     "ImageItem",
     "ImageMetadata",
-    "AuditLog"
+    "AuditLog",
+    "RejectionFeedback",
+    "CategoryFeedbackInsight"
 ]

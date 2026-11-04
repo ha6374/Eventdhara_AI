@@ -5,11 +5,24 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.image import ImageItem
 from app.models.audit import AuditLog
-from app.schemas.image import ImageResponse, ImageListResponse, ImageStatusUpdate, ImageBulkAction
+from app.models.feedback import RejectionFeedback
+from app.schemas.image import (
+    ImageResponse,
+    ImageListResponse,
+    ImageStatusUpdate,
+    ImageBulkAction,
+    ImageRejectRequest,
+    FeedbackResponse
+)
 from app.repositories.image_repo import ImageRepository
 from app.services.duplicate_service import DuplicateService
 from app.services.metadata_service import MetadataService
 from app.services.drive_service import GoogleDriveService
+from app.services.feedback_service import FeedbackLearningService
+from app.services.category_storage import (
+    organize_image_in_category_folder,
+    remove_image_from_storage
+)
 
 router = APIRouter()
 
@@ -22,7 +35,7 @@ def list_images(
     is_duplicate: Optional[bool] = None,
     search: Optional[str] = None,
     page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
+    size: int = Query(24, ge=1, le=200),
     sort_by: str = "created_at",
     sort_order: str = "desc",
     db: Session = Depends(get_db)
@@ -58,6 +71,20 @@ def list_images(
     )
 
 
+@router.get("/feedbacks", response_model=List[FeedbackResponse])
+def get_all_feedbacks(db: Session = Depends(get_db)):
+    """Retrieve recorded operator rejection feedback history."""
+    feedbacks = db.query(RejectionFeedback).order_by(RejectionFeedback.created_at.desc()).limit(100).all()
+    return feedbacks
+
+
+@router.get("/evaluation")
+def get_model_evaluation(db: Session = Depends(get_db)):
+    """Retrieve AI model evaluation metrics (Precision, Recall, Accuracy, F1-Score)."""
+    feedback_service = FeedbackLearningService(db)
+    return feedback_service.evaluate_model_performance()
+
+
 @router.get("/{image_id}", response_model=ImageResponse)
 def get_image(image_id: int, db: Session = Depends(get_db)):
     """Fetch detailed image record."""
@@ -65,6 +92,96 @@ def get_image(image_id: int, db: Session = Depends(get_db)):
     img = repo.get_by_id(image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
+
+    resp = ImageResponse.model_validate(img)
+    if img.category:
+        resp.category_name = img.category.name
+    return resp
+
+
+@router.delete("/{image_id}")
+def delete_image(image_id: int, db: Session = Depends(get_db)):
+    """
+    Permanently deletes a single image from the database and storage folders,
+    logging the deletion action in audit logs.
+    """
+    repo = ImageRepository(db)
+    img = repo.get_by_id(image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    filename = img.original_filename
+    cat_name = img.category.name if img.category else "Uncategorized"
+
+    # Audit log entry before deletion
+    audit = AuditLog(
+        action="DELETE_IMAGE",
+        image_id=image_id,
+        details=f"Permanently deleted image #{image_id} ('{filename}') from category '{cat_name}'."
+    )
+    db.add(audit)
+    db.commit()
+
+    success = repo.delete(image_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete image files")
+
+    return {
+        "success": True,
+        "image_id": image_id,
+        "filename": filename,
+        "message": f"Image #{image_id} successfully deleted."
+    }
+
+
+@router.post("/{image_id}/reject", response_model=ImageResponse)
+def reject_image_with_feedback(
+    image_id: int,
+    payload: ImageRejectRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Rejects an image and collects structured rejection feedback to improve future AI classifications.
+    """
+    repo = ImageRepository(db)
+    img = repo.get_by_id(image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    old_status = img.status
+    img.status = "REJECTED"
+    img.rejection_reason = payload.rejection_reason
+    db.commit()
+
+    # Record feedback and trigger AI learning
+    try:
+        feedback_service = FeedbackLearningService(db)
+        feedback_service.record_feedback(
+            image_id=img.id,
+            rejection_reason=payload.rejection_reason,
+            custom_feedback=payload.custom_feedback,
+            user_id=payload.user_id or "operator"
+        )
+    except Exception as e:
+        logger = logging.getLogger("eventdhara.images")
+        logger.warning("Error recording rejection feedback: %s", e)
+
+    # Relocate file to category Rejected folder
+    try:
+        organize_image_in_category_folder(img, old_status=old_status)
+    except Exception as e:
+        logger = logging.getLogger("eventdhara.images")
+        logger.warning("Error reorganizing category folder on reject: %s", e)
+
+    # Audit log
+    audit = AuditLog(
+        action="REJECT_IMAGE",
+        image_id=img.id,
+        details=f"Image rejected. Reason: '{payload.rejection_reason}'. Feedback: '{payload.custom_feedback or ''}'"
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(img)
 
     resp = ImageResponse.model_validate(img)
     if img.category:
@@ -112,6 +229,24 @@ def update_image_status(
     db.commit()
     db.refresh(img)
 
+    # Relocate file in category folders
+    try:
+        organize_image_in_category_folder(img, old_status=old_status)
+    except Exception as e:
+        pass
+
+    # If rejected, record feedback
+    if new_status == "REJECTED":
+        try:
+            feedback_service = FeedbackLearningService(db)
+            feedback_service.record_feedback(
+                image_id=img.id,
+                rejection_reason=payload.reason or "Manual Operator Rejection",
+                custom_feedback=payload.custom_feedback
+            )
+        except Exception:
+            pass
+
     # Audit log
     audit = AuditLog(
         action="UPDATE_STATUS",
@@ -130,13 +265,14 @@ def update_image_status(
 @router.post("/bulk-action")
 def bulk_image_action(payload: ImageBulkAction, db: Session = Depends(get_db)):
     """
-    Execute bulk batch actions across multiple selected images.
+    Execute bulk batch actions across multiple selected images (including DELETE).
     """
     action = payload.action.upper()
     images = db.query(ImageItem).filter(ImageItem.id.in_(payload.image_ids)).all()
     dup_service = DuplicateService(db)
     meta_service = MetadataService(db)
     drive_service = GoogleDriveService(db)
+    repo = ImageRepository(db)
 
     success_count = 0
     failed_count = 0
@@ -144,26 +280,45 @@ def bulk_image_action(payload: ImageBulkAction, db: Session = Depends(get_db)):
 
     for img in images:
         try:
-            if action == "APPROVE":
+            if action == "DELETE":
+                success = repo.delete(img.id)
+                if success:
+                    success_count += 1
+                else:
+                    failed_count += 1
+            elif action == "APPROVE":
                 # Recheck duplicate status
                 is_dup, orig, sim, _ = dup_service.check_global_duplicate(img.sha256, img.phash, exclude_id=img.id)
                 if is_dup:
                     failed_count += 1
                     messages.append(f"Image #{img.id} is duplicate of #{orig.id}")
                     continue
+                old_status = img.status
                 img.status = "APPROVED"
+                organize_image_in_category_folder(img, old_status=old_status)
                 success_count += 1
             elif action == "REJECT":
+                old_status = img.status
                 img.status = "REJECTED"
                 img.rejection_reason = payload.reason or "Bulk rejected by operator"
+                organize_image_in_category_folder(img, old_status=old_status)
+                # Record feedback
+                try:
+                    fservice = FeedbackLearningService(db)
+                    fservice.record_feedback(image_id=img.id, rejection_reason=img.rejection_reason)
+                except Exception:
+                    pass
                 success_count += 1
             elif action == "MARK_REVIEW":
+                old_status = img.status
                 img.status = "REVIEW_REQUIRED"
                 img.review_reason = payload.reason or "Marked for review in bulk"
+                organize_image_in_category_folder(img, old_status=old_status)
                 success_count += 1
             elif action == "ASSIGN_CATEGORY":
                 if payload.category_id:
                     img.category_id = payload.category_id
+                    organize_image_in_category_folder(img)
                     success_count += 1
             elif action == "GENERATE_METADATA":
                 if img.status == "APPROVED":

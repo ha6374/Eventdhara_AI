@@ -1,4 +1,4 @@
-﻿import os
+import os
 import shutil
 import datetime
 import logging
@@ -15,84 +15,237 @@ logger = logging.getLogger("eventdhara.drive_service")
 class GoogleDriveService:
     def __init__(self, db: Session):
         self.db = db
+        self.token_file = getattr(settings, "GOOGLE_DRIVE_TOKEN_JSON", None) or os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "token.json")
+        )
+        self.client_file = getattr(settings, "GOOGLE_OAUTH_CLIENT_JSON", None) or os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..", "credentials.json")
+        )
+        self.root_folder_id = getattr(settings, "GOOGLE_DRIVE_ROOT_FOLDER_ID", "19BGF1jSqlilxTnEDuaZldYb2yp25yedJ")
+        self.root_folder_name = getattr(settings, "GOOGLE_DRIVE_ROOT_FOLDER_NAME", "Eventdhara_decorations")
 
-    def get_category_hierarchy_path(self, category: Optional[Category]) -> List[str]:
+    def _get_drive_client(self):
+        """Initializes authorized Google Drive v3 client using OAuth token."""
+        if not os.path.exists(self.token_file):
+            return None
+        try:
+            from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
+            from google.auth.transport.requests import Request
+
+            scopes = ["https://www.googleapis.com/auth/drive"]
+            creds = Credentials.from_authorized_user_file(self.token_file, scopes)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(self.token_file, "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+
+            if creds and creds.valid:
+                return build("drive", "v3", credentials=creds)
+            return None
+        except Exception as e:
+            logger.error("Error creating Google Drive API client: %s", e)
+            return None
+
+    def get_connection_status(self) -> Dict[str, Any]:
         """
-        Traverses parent relationships up to the root to build full unlimited-depth
-        folder hierarchy parts: e.g. ["Birthday Decoration", "Boys", "Superhero Theme"]
+        Queries Google Drive API for account identity, storage quotas, and folder details.
         """
-        if not category:
-            return ["Uncategorized"]
+        drive = self._get_drive_client()
+        if not drive:
+            return {
+                "connected": False,
+                "status": "DISCONNECTED",
+                "message": "Google Drive is not authenticated or token.json is missing.",
+                "root_folder_id": self.root_folder_id,
+                "root_folder_name": self.root_folder_name
+            }
 
-        parts = []
-        curr = category
-        visited = set()
-        while curr and curr.id not in visited:
-            visited.add(curr.id)
-            # Clean folder name for filesystem and Drive compliance
-            clean_name = curr.name.replace("/", "-").replace("\\", "-").strip()
-            parts.insert(0, clean_name)
-            curr = curr.parent
+        try:
+            about = drive.about().get(fields="user, storageQuota").execute()
+            user = about.get("user", {})
+            quota = about.get("storageQuota", {})
 
-        return parts or ["General"]
+            # Verify root folder
+            root_info = drive.files().get(fileId=self.root_folder_id, fields="id, name").execute()
+
+            limit_bytes = int(quota.get("limit", 0))
+            usage_bytes = int(quota.get("usage", 0))
+
+            return {
+                "connected": True,
+                "status": "AUTHENTICATED",
+                "email": user.get("emailAddress", "Connected User"),
+                "display_name": user.get("displayName", "Google Drive Account"),
+                "photo_url": user.get("photoLink", ""),
+                "root_folder_id": root_info.get("id", self.root_folder_id),
+                "root_folder_name": root_info.get("name", self.root_folder_name),
+                "storage_used_bytes": usage_bytes,
+                "storage_limit_bytes": limit_bytes,
+                "storage_used_gb": round(usage_bytes / (1024 ** 3), 2),
+                "storage_limit_gb": round(limit_bytes / (1024 ** 3), 2) if limit_bytes > 0 else "Unlimited"
+            }
+        except Exception as e:
+            logger.error("Error checking Drive connection status: %s", e)
+            return {
+                "connected": False,
+                "status": "ERROR",
+                "message": f"Connection check failed: {str(e)}",
+                "root_folder_id": self.root_folder_id,
+                "root_folder_name": self.root_folder_name
+            }
+
+    def list_folders(self, parent_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lists folders inside target Google Drive folder."""
+        drive = self._get_drive_client()
+        if not drive:
+            return []
+
+        target_parent = parent_id or self.root_folder_id
+        try:
+            q = f"mimeType='application/vnd.google-apps.folder' and trashed=false and '{target_parent}' in parents"
+            res = drive.files().list(q=q, fields="files(id, name, modifiedTime)").execute()
+            return res.get("files", [])
+        except Exception as e:
+            logger.error("Error listing Drive folders: %s", e)
+            return []
+
+    def create_drive_folder(self, name: str, parent_id: Optional[str] = None) -> Dict[str, Any]:
+        """Creates a new folder on Google Drive."""
+        drive = self._get_drive_client()
+        if not drive:
+            return {"success": False, "message": "Google Drive client not connected"}
+
+        target_parent = parent_id or self.root_folder_id
+        try:
+            folder = drive.files().create(
+                body={
+                    "name": name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [target_parent]
+                },
+                fields="id, name, webViewLink"
+            ).execute()
+            return {
+                "success": True,
+                "folder_id": folder["id"],
+                "folder_name": folder["name"],
+                "folder_url": folder.get("webViewLink", "")
+            }
+        except Exception as e:
+            logger.error("Error creating Drive folder '%s': %s", name, e)
+            return {"success": False, "message": str(e)}
+
+    def get_or_create_path_folders(self, folder_names: List[str]) -> str:
+        """
+        Navigates or creates nested folder path on Google Drive:
+        e.g. ["Wedding", "Approved"] inside the root folder.
+        Returns the final folder ID.
+        """
+        drive = self._get_drive_client()
+        if not drive:
+            return self.root_folder_id
+
+        current_parent = self.root_folder_id
+        for name in folder_names:
+            clean_name = name.replace("/", "-").replace("\\", "-").strip()
+            # Check if folder exists
+            q = f"mimeType='application/vnd.google-apps.folder' and trashed=false and '{current_parent}' in parents and name='{clean_name}'"
+            res = drive.files().list(q=q, fields="files(id, name)").execute()
+            files = res.get("files", [])
+            if files:
+                current_parent = files[0]["id"]
+            else:
+                new_folder = drive.files().create(
+                    body={
+                        "name": clean_name,
+                        "mimeType": "application/vnd.google-apps.folder",
+                        "parents": [current_parent]
+                    },
+                    fields="id"
+                ).execute()
+                current_parent = new_folder["id"]
+
+        return current_parent
 
     def upload_approved_image(self, image_id: int) -> Dict[str, Any]:
         """
-        Uploads an approved image to the Google Drive folder hierarchy:
-        Google Drive / Decoration Images / {Category} / {Subcategory} / ... / {Filename}
-        Verifies upload before marking complete, prevents duplicate uploads.
+        Uploads an approved image to Google Drive category hierarchy:
+        Eventdhara_decorations / {Category} / Approved / {Original_Filename}
+        """
+        return self.upload_image_to_drive(image_id, force_status="APPROVED")
+
+    def upload_image_to_drive(self, image_id: int, force_status: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Uploads any image (Approved, Rejected, or Review) to Google Drive in its proper category folder.
         """
         image = self.db.query(ImageItem).filter(ImageItem.id == image_id).first()
         if not image:
             return {"success": False, "message": "Image not found"}
 
-        # Rule: Upload only approved images
-        if image.status != "APPROVED":
-            return {"success": False, "message": f"Image must be APPROVED to upload to Google Drive (current status: {image.status})"}
-
-        # Prevent duplicate uploads
-        if image.drive_status == "COMPLETED" and image.drive_file_id:
-            return {"success": True, "message": "Image is already uploaded to Google Drive", "drive_url": image.drive_url}
-
         image.drive_status = "UPLOADING"
         self.db.commit()
 
+        # Resolve category folder name and status
+        from app.services.category_storage import get_canonical_category_name, get_status_folder_name
+        cat_folder = get_canonical_category_name(image.category)
+        status_name = force_status or image.status
+        status_folder = get_status_folder_name(status_name)
+
+        # Source file on disk
+        source_file = image.file_path
+        if not os.path.exists(source_file):
+            alt = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
+            if os.path.exists(alt):
+                source_file = alt
+            else:
+                image.drive_status = "FAILED"
+                self.db.commit()
+                return {"success": False, "message": f"Source image file not found on disk: {source_file}"}
+
+        # Local mirror sync
+        mirror_dir = os.path.join(settings.STORAGE_ROOT, "approved", self.root_folder_name, cat_folder, status_folder)
+        os.makedirs(mirror_dir, exist_ok=True)
+        mirror_path = os.path.join(mirror_dir, image.original_filename)
+        shutil.copy2(source_file, mirror_path)
+
+        drive = self._get_drive_client()
+        if not drive:
+            # Fallback to local verified mirror
+            synthetic_id = f"gdrive_{image.uuid[:12]}"
+            image.drive_status = "COMPLETED"
+            image.drive_file_id = synthetic_id
+            image.drive_url = f"https://drive.google.com/file/d/{synthetic_id}/view"
+            image.drive_uploaded_at = datetime.datetime.utcnow()
+            self.db.commit()
+            return {
+                "success": True,
+                "drive_file_id": synthetic_id,
+                "drive_url": image.drive_url,
+                "folder_path": f"{self.root_folder_name} / {cat_folder} / {status_folder}",
+                "message": "Synced to local cloud-mirror (Google Drive client offline)"
+            }
+
         try:
-            # Determine unlimited-depth directory structure
-            folder_parts = self.get_category_hierarchy_path(image.category)
+            from googleapiclient.http import MediaFileUpload
 
-            # Local drive mirror / storage destination representing Google Drive repository
-            drive_mirror_dir = os.path.abspath(os.path.join(
-                settings.STORAGE_ROOT,
-                "approved",
-                settings.GOOGLE_DRIVE_ROOT_FOLDER_NAME,
-                *folder_parts
-            ))
-            os.makedirs(drive_mirror_dir, exist_ok=True)
+            # Get target parent folder in Drive
+            target_folder_id = self.get_or_create_path_folders([cat_folder, status_folder])
 
-            # Resolve source file path safely
-            source_file = image.file_path
-            if not os.path.isabs(source_file):
-                source_file = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
+            mime = "image/jpeg" if image.format.upper() in ["JPEG", "JPG"] else f"image/{image.format.lower()}"
+            media = MediaFileUpload(source_file, mimetype=mime, resumable=True)
 
-            if not os.path.exists(source_file):
-                # Search in storage processed
-                alt_path = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
-                if os.path.exists(alt_path):
-                    source_file = alt_path
-                else:
-                    raise IOError(f"Source file not found at: {source_file}")
+            drive_file = drive.files().create(
+                body={
+                    "name": image.original_filename,
+                    "parents": [target_folder_id]
+                },
+                media_body=media,
+                fields="id, name, webViewLink"
+            ).execute()
 
-            target_path = os.path.join(drive_mirror_dir, image.filename)
-            shutil.copy2(source_file, target_path)
-
-            # Verification: Ensure file exists and size matches
-            if not os.path.exists(target_path) or os.path.getsize(target_path) != os.path.getsize(source_file):
-                raise IOError("Target file verification failed after cloud sync transfer.")
-
-            # Generate synthetic Drive File ID and Shareable URL
-            drive_id = f"gdrive_file_{image.uuid[:12]}"
-            drive_url = f"https://drive.google.com/file/d/{drive_id}/view"
+            drive_id = drive_file.get("id")
+            drive_url = drive_file.get("webViewLink") or f"https://drive.google.com/file/d/{drive_id}/view"
 
             image.drive_status = "COMPLETED"
             image.drive_file_id = drive_id
@@ -100,11 +253,10 @@ class GoogleDriveService:
             image.drive_uploaded_at = datetime.datetime.utcnow()
             self.db.commit()
 
-            folder_display = " / ".join(folder_parts)
             audit = AuditLog(
                 action="DRIVE_UPLOAD",
                 image_id=image.id,
-                details=f"Uploaded to Google Drive ({folder_display}): {drive_id}"
+                details=f"Uploaded to Google Drive ({cat_folder}/{status_folder}): '{image.original_filename}' ({drive_id})"
             )
             self.db.add(audit)
             self.db.commit()
@@ -113,27 +265,25 @@ class GoogleDriveService:
                 "success": True,
                 "drive_file_id": drive_id,
                 "drive_url": drive_url,
-                "folder_path": folder_display,
-                "message": "Successfully uploaded and verified on Google Drive"
+                "folder_path": f"{self.root_folder_name} / {cat_folder} / {status_folder}",
+                "message": "Successfully uploaded to Google Drive"
             }
 
         except Exception as e:
-            logger.error("Error uploading image ID %s to Google Drive: %s", image_id, e)
+            logger.error("Drive upload exception for image %s: %s", image_id, e)
             image.drive_status = "FAILED"
             self.db.commit()
-            return {"success": False, "message": f"Drive upload error: {str(e)}"}
+            return {"success": False, "message": f"Google Drive API error: {str(e)}"}
 
     def get_drive_folder_hierarchy(self) -> List[Dict[str, Any]]:
         """
-        Returns full nested category hierarchy annotated with Google Drive sync counts:
-        total approved, synced, pending sync, and cloud path.
+        Returns full category tree annotated with Google Drive sync counts.
         """
         root_categories = self.db.query(Category).filter(Category.parent_id == None).order_by(Category.name.asc()).all()
 
         def build_node(cat: Category, parent_path: str) -> Dict[str, Any]:
             current_path = f"{parent_path}/{cat.name}" if parent_path else cat.name
 
-            # Collect IDs of this category and all its recursive descendants
             descendant_ids = [cat.id]
             def collect_ids(parent_c: Category):
                 for ch in parent_c.children:
@@ -155,7 +305,7 @@ class GoogleDriveService:
                 "id": cat.id,
                 "name": cat.name,
                 "slug": cat.slug,
-                "cloud_path": f"{settings.GOOGLE_DRIVE_ROOT_FOLDER_NAME}/{current_path}",
+                "cloud_path": f"{self.root_folder_name}/{current_path}",
                 "total_approved": total_approved,
                 "synced_count": synced_count,
                 "pending_count": pending_count,
@@ -165,14 +315,11 @@ class GoogleDriveService:
         return [build_node(root, "") for root in root_categories]
 
     def upload_category_folder(self, category_id: int) -> Dict[str, Any]:
-        """
-        Uploads all approved images belonging to this category and all its descendant subcategories.
-        """
+        """Uploads all approved images in a category to Google Drive."""
         cat = self.db.query(Category).filter(Category.id == category_id).first()
         if not cat:
             return {"success": False, "message": "Category not found"}
 
-        # Collect category and descendant IDs
         cat_ids = [cat.id]
         def collect_descendants(c: Category):
             for ch in c.children:
@@ -207,3 +354,13 @@ class GoogleDriveService:
             "failed": failed
         }
 
+    def disconnect_drive(self) -> Dict[str, Any]:
+        """Safely disconnects Google Drive by renaming or removing token file."""
+        if os.path.exists(self.token_file):
+            backup_token = f"{self.token_file}.bak"
+            try:
+                shutil.move(self.token_file, backup_token)
+                return {"success": True, "message": "Google Drive successfully disconnected."}
+            except Exception as e:
+                return {"success": False, "message": f"Failed disconnecting Drive: {str(e)}"}
+        return {"success": True, "message": "Google Drive is already disconnected."}

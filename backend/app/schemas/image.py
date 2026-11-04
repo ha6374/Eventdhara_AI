@@ -4,12 +4,15 @@ from pydantic import BaseModel, ConfigDict
 
 
 class AIClassificationResult(BaseModel):
-    matched_category: str = ""
+    predicted_category: str = ""
     matched_subcategory: str = ""
-    confidence: float = 0.0
-    visible_evidence: List[str] = []
-    reason: str = ""
-    decision: str = "REVIEW_REQUIRED"  # APPROVED, REJECTED, REVIEW_REQUIRED, DUPLICATE
+    uploaded_category: str = ""
+    category_match: bool = True
+    image_quality: str = "HIGH"
+    confidence_score: float = 0.0
+    approval_status: str = "REVIEW_REQUIRED"
+    rejection_reason: str = ""
+    review_required: bool = False
 
 
 class ImageResponse(BaseModel):
@@ -63,10 +66,32 @@ class ImageStatusUpdate(BaseModel):
     status: str  # APPROVED, REJECTED, REVIEW_REQUIRED
     category_id: Optional[int] = None
     reason: Optional[str] = None
+    custom_feedback: Optional[str] = None
+
+
+class ImageRejectRequest(BaseModel):
+    rejection_reason: str
+    custom_feedback: Optional[str] = None
+    user_id: Optional[str] = "operator"
 
 
 class ImageBulkAction(BaseModel):
     image_ids: List[int]
-    action: str  # APPROVE, REJECT, MARK_REVIEW, ASSIGN_CATEGORY, RETRY_AI, RETRY_METADATA, UPLOAD_DRIVE
+    action: str  # APPROVE, REJECT, MARK_REVIEW, ASSIGN_CATEGORY, RETRY_AI, RETRY_METADATA, UPLOAD_DRIVE, DELETE
     category_id: Optional[int] = None
     reason: Optional[str] = None
+
+
+class FeedbackResponse(BaseModel):
+    id: int
+    image_id: int
+    original_filename: str
+    original_category: Optional[str] = None
+    predicted_category: Optional[str] = None
+    rejection_reason: str
+    custom_feedback: Optional[str] = None
+    ai_confidence_score: Optional[float] = None
+    insights: Optional[str] = None
+    created_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)

@@ -1,5 +1,5 @@
 import datetime
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, ConfigDict
 
 
@@ -12,6 +12,7 @@ class MetadataBase(BaseModel):
     note: Optional[str] = None
     keywords: Optional[List[str]] = []
     tags: Optional[List[str]] = []
+    custom_fields: Optional[Dict[str, Any]] = None
 
 
 class MetadataCreate(MetadataBase):
@@ -27,6 +28,7 @@ class MetadataUpdate(BaseModel):
     note: Optional[str] = None
     keywords: Optional[List[str]] = None
     tags: Optional[List[str]] = None
+    custom_fields: Optional[Dict[str, Any]] = None
 
 
 class MetadataResponse(BaseModel):
@@ -40,9 +42,15 @@ class MetadataResponse(BaseModel):
     note: Optional[str] = None
     keywords: Optional[List[str]] = []
     tags: Optional[List[str]] = []
+    custom_fields: Optional[Dict[str, Any]] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
     image_filename: Optional[str] = None
+    original_filename: Optional[str] = None
     image_url: Optional[str] = None
+    photo: Optional[str] = None
+    category_name: Optional[str] = None
+    approval_status: Optional[str] = None
+    processing_status: Optional[str] = "COMPLETED"
 
     model_config = ConfigDict(from_attributes=True)

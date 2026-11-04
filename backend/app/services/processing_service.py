@@ -17,6 +17,8 @@ from app.repositories.image_repo import ImageRepository
 from app.repositories.category_repo import CategoryRepository
 from app.services.duplicate_service import DuplicateService
 from app.services.gemini_service import gemini_service
+from app.services.feedback_service import FeedbackLearningService
+from app.services.category_storage import organize_image_in_category_folder
 
 logger = logging.getLogger("eventdhara.processing_engine")
 
@@ -29,6 +31,7 @@ class ProcessingService:
         self.repo = ImageRepository(db)
         self.cat_repo = CategoryRepository(db)
         self.dup_service = DuplicateService(db)
+        self.feedback_service = FeedbackLearningService(db)
 
     def compute_blur_score(self, file_path: str) -> float:
         """Computes variance of the Laplacian using OpenCV."""
@@ -42,14 +45,44 @@ class ProcessingService:
             logger.warning("Error computing blur score for %s: %s", file_path, e)
             return 0.0
 
+    def check_lighting_quality(self, file_path: str) -> Tuple[bool, Optional[str], float]:
+        """
+        Detects underexposed (dark) or overexposed (blown out) photography.
+        Returns (is_acceptable, rejection_or_review_reason, mean_brightness).
+        """
+        try:
+            img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return True, None, 128.0
+
+            mean_val = float(np.mean(img))
+            if mean_val < 32.0:
+                return False, f"Severe underexposure / dark image detected (Mean Luminance: {mean_val:.1f}/255)", mean_val
+            if mean_val > 238.0:
+                return False, f"Severe overexposure / blown out lighting detected (Mean Luminance: {mean_val:.1f}/255)", mean_val
+            return True, None, mean_val
+        except Exception as e:
+            logger.warning("Error checking lighting for %s: %s", file_path, e)
+            return True, None, 128.0
+
+    def detect_screenshot(self, file_path: str, width: int, height: int) -> Tuple[bool, float]:
+        """
+        Detects smartphone screenshots based on typical aspect ratios and top status bar characteristics.
+        """
+        if width == 0 or height == 0:
+            return False, 1.0
+
+        aspect_ratio = max(width, height) / float(min(width, height))
+        # Modern mobile screenshots usually have aspect ratio > 2.05 (e.g. 19.5:9, 20:9, 21:9)
+        if aspect_ratio >= 2.08:
+            return True, aspect_ratio
+
+        return False, aspect_ratio
+
     def detect_watermark(self, file_path: str) -> Tuple[bool, float]:
         """
-        Optional Watermark Detection using OpenCV corner edge and text-density analysis.
-        Inspects bottom-right, bottom-left, and bottom banner regions.
+        Inspects bottom banner and corner regions for edge density indicating watermarks/overlays.
         """
-        if not settings.WATERMARK_DETECTION:
-            return False, 0.0
-
         try:
             img = cv2.imread(file_path)
             if img is None:
@@ -115,19 +148,19 @@ class ProcessingService:
         target_category_id: Optional[int] = None
     ) -> ImageItem:
         """
-        Executes the 5-step production pipeline:
+        Executes the full production pipeline:
         1. File Validation
-        2. Duplicate Detection
-        3. Quality Check
-        4. AI Classification
-        5. Final Decision
+        2. Duplicate Detection (SHA256 & pHash)
+        3. Quality Check (Blur, Lighting, Watermark, Screenshot)
+        4. Category-Aware AI Classification & Feedback Learning
+        5. Final Decision & Category Folder Organization
         """
         start_time = time.time()
         file_uuid = str(uuid.uuid4())
         ext = os.path.splitext(original_filename)[1].lower() or ".jpg"
         new_filename = f"{file_uuid}{ext}"
 
-        # Safe file copy to processed storage
+        # Safe file copy to processed storage (canonical master repository)
         dest_path = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", new_filename))
         shutil.copy2(source_file_path, dest_path)
 
@@ -151,62 +184,80 @@ class ProcessingService:
                 quality_status="FAILED",
                 status="REJECTED",
                 rejection_reason=f"Validation failed: {val_err}",
+                category_id=target_category_id,
                 batch_id=batch_id,
                 processing_duration_ms=duration_ms
             )
             self.db.add(item)
             self.db.commit()
             self.db.refresh(item)
+            # Organize into Rejected folder
+            organize_image_in_category_folder(item)
             return item
 
-        # Compute hashes
+        # Compute cryptographic and perceptual hashes
         sha256_hash = self.dup_service.compute_sha256(dest_path)
         phash_str = self.dup_service.compute_phash(dest_path)
 
         # STEP 2: DUPLICATE DETECTION
         is_dup, dup_origin, similarity, dup_type = self.dup_service.check_global_duplicate(sha256_hash, phash_str)
 
-        # STEP 3: QUALITY CHECK
+        # STEP 3: QUALITY & PHYSICAL CHECKS
         blur_score = self.compute_blur_score(dest_path)
         has_watermark, wm_density = self.detect_watermark(dest_path)
-        quality_passed = (blur_score >= settings.BLUR_THRESHOLD) and (not has_watermark)
+        lighting_ok, lighting_err, mean_lum = self.check_lighting_quality(dest_path)
+        is_screenshot, aspect_ratio = self.detect_screenshot(dest_path, meta["width"], meta["height"])
+
+        quality_passed = (blur_score >= settings.BLUR_THRESHOLD) and (not has_watermark) and lighting_ok and (not is_screenshot)
         quality_status = "PASSED" if quality_passed else "FAILED"
 
-        # STEP 4: AI CLASSIFICATION (only if not a duplicate and passes basic quality)
+        # Resolve target category
+        target_category = None
+        if target_category_id:
+            target_category = self.db.query(Category).filter(Category.id == target_category_id).first()
+        target_cat_name = target_category.name if target_category else "Unspecified"
+
+        # STEP 4: AI CLASSIFICATION (with Historical Feedback Context Injection)
         ai_result = {}
         ai_confidence = 0.0
         ai_decision = "REVIEW_REQUIRED"
         assigned_category_id = target_category_id
 
-        if not is_dup and quality_passed:
-            ai_result = gemini_service.classify_image(dest_path)
-            ai_confidence = float(ai_result.get("confidence", 0.0))
-            ai_decision = ai_result.get("decision", "REVIEW_REQUIRED")
+        if not is_dup:
+            feedback_context = self.feedback_service.get_historical_context(target_cat_name)
+            ai_result = gemini_service.classify_image(
+                image_path=dest_path,
+                uploaded_category=target_cat_name,
+                historical_feedback_context=feedback_context
+            )
+            ai_confidence = float(ai_result.get("confidence_score") or ai_result.get("confidence", 0.0))
+            ai_decision = ai_result.get("approval_status") or ai_result.get("decision", "REVIEW_REQUIRED")
 
-            # Try mapping AI category to database category if not manually provided
+            # Try mapping AI predicted category if target wasn't explicitly selected
             if not assigned_category_id:
+                pred_name = ai_result.get("predicted_category")
                 sub_name = ai_result.get("matched_subcategory")
-                cat_name = ai_result.get("matched_category")
                 matched_db_cat = None
                 if sub_name:
                     matched_db_cat = self.db.query(Category).filter(Category.name.ilike(f"%{sub_name}%")).first()
-                if not matched_db_cat and cat_name:
-                    matched_db_cat = self.db.query(Category).filter(Category.name.ilike(f"%{cat_name}%")).first()
+                if not matched_db_cat and pred_name:
+                    matched_db_cat = self.db.query(Category).filter(Category.name.ilike(f"%{pred_name}%")).first()
                 if matched_db_cat:
                     assigned_category_id = matched_db_cat.id
 
-        # STEP 5: FINAL DECISION
-        # Rules:
-        # 1. Never approve an image if duplicate verification fails
-        # 2. Clearly unrelated images must be rejected
-        # 3. Uncertain results must go to review
-        # 4. Failed quality check (too blurry) -> REJECTED or REVIEW_REQUIRED based on score
+        # STEP 5: FINAL DECISION POLICY
         rejection_reason = None
         review_reason = None
 
         if is_dup:
             final_status = "DUPLICATE"
             review_reason = f"Duplicate of image #{dup_origin.id} ({similarity:.1f}% similarity via {dup_type})"
+        elif not lighting_ok:
+            final_status = "REJECTED"
+            rejection_reason = lighting_err
+        elif is_screenshot:
+            final_status = "REJECTED"
+            rejection_reason = f"Detected screenshot / non-original photographic aspect ratio ({aspect_ratio:.2f}:1)"
         elif not quality_passed:
             if has_watermark:
                 final_status = "REVIEW_REQUIRED"
@@ -217,14 +268,17 @@ class ProcessingService:
             else:
                 final_status = "REVIEW_REQUIRED"
                 review_reason = f"Image sharpness below standard (Blur Score: {blur_score:.1f}, minimum {settings.BLUR_THRESHOLD})"
+        elif ai_result.get("category_match") is False:
+            final_status = "REJECTED"
+            rejection_reason = ai_result.get("rejection_reason") or f"Category mismatch: Image does not match selected '{target_cat_name}' category."
         elif ai_decision == "REJECTED":
             final_status = "REJECTED"
-            rejection_reason = ai_result.get("reason", "AI detected image is not related to event decoration.")
+            rejection_reason = ai_result.get("rejection_reason") or "AI identified image as unrelated to event decoration."
         elif ai_decision == "APPROVED" and ai_confidence >= settings.AI_CONFIDENCE_THRESHOLD:
             final_status = "APPROVED"
         else:
             final_status = "REVIEW_REQUIRED"
-            review_reason = ai_result.get("reason", "Classification requires manual operator confirmation.")
+            review_reason = ai_result.get("rejection_reason") or "Classification requires manual operator confirmation."
 
         duration_ms = (time.time() - start_time) * 1000
 
@@ -261,6 +315,12 @@ class ProcessingService:
         self.db.add(image_item)
         self.db.commit()
         self.db.refresh(image_item)
+
+        # STEP 6: DYNAMIC CATEGORY FOLDER STORAGE
+        try:
+            organize_image_in_category_folder(image_item)
+        except Exception as e:
+            logger.warning("Error organizing image in category folder: %s", e)
 
         # Audit log
         audit = AuditLog(

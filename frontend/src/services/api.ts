@@ -6,7 +6,12 @@ import type {
   ImageItem,
   ImageMetadata,
   DuplicateComparisonItem,
-  SystemSettings
+  SystemSettings,
+  DriveStatusResponse,
+  DriveFolderItem,
+  SheetsExportResponse,
+  FeedbackItem,
+  ModelEvaluation
 } from '@/types'
 
 const apiClient = axios.create({
@@ -93,13 +98,37 @@ export const api = {
     return res.data
   },
 
-  async updateImageStatus(id: number, status: string, reason?: string, category_id?: number) {
-    const res = await apiClient.patch(`/images/${id}/status`, { status, reason, category_id })
+  async updateImageStatus(id: number, status: string, reason?: string, category_id?: number, custom_feedback?: string) {
+    const res = await apiClient.patch(`/images/${id}/status`, { status, reason, category_id, custom_feedback })
+    return res.data
+  },
+
+  async rejectImageWithFeedback(id: number, rejection_reason: string, custom_feedback?: string) {
+    const res = await apiClient.post(`/images/${id}/reject`, {
+      rejection_reason,
+      custom_feedback,
+      user_id: 'operator',
+    })
+    return res.data
+  },
+
+  async deleteImage(id: number) {
+    const res = await apiClient.delete(`/images/${id}`)
     return res.data
   },
 
   async bulkImageAction(image_ids: number[], action: string, reason?: string, category_id?: number) {
     const res = await apiClient.post('/images/bulk-action', { image_ids, action, reason, category_id })
+    return res.data
+  },
+
+  async getFeedbacks(): Promise<FeedbackItem[]> {
+    const res = await apiClient.get<FeedbackItem[]>('/images/feedbacks')
+    return res.data
+  },
+
+  async getModelEvaluation(): Promise<ModelEvaluation> {
+    const res = await apiClient.get<ModelEvaluation>('/images/evaluation')
     return res.data
   },
 
@@ -132,6 +161,11 @@ export const api = {
     return res.data
   },
 
+  async regenerateMetadata(imageId: number): Promise<ImageMetadata> {
+    const res = await apiClient.post<ImageMetadata>(`/metadata/regenerate/${imageId}`)
+    return res.data
+  },
+
   async updateMetadata(id: number, data: Partial<ImageMetadata>): Promise<ImageMetadata> {
     const res = await apiClient.put<ImageMetadata>(`/metadata/${id}`, data)
     return res.data
@@ -143,8 +177,20 @@ export const api = {
   },
 
   // Google Drive
-  async getDriveStatus() {
-    const res = await apiClient.get('/google-drive/status')
+  async getDriveStatus(): Promise<DriveStatusResponse> {
+    const res = await apiClient.get<DriveStatusResponse>('/google-drive/status')
+    return res.data
+  },
+
+  async browseDriveFolders(parentId?: string): Promise<DriveFolderItem[]> {
+    const res = await apiClient.get<DriveFolderItem[]>('/google-drive/browse-folders', {
+      params: { parent_id: parentId },
+    })
+    return res.data
+  },
+
+  async createDriveFolder(name: string, parentId?: string) {
+    const res = await apiClient.post('/google-drive/folder', { name, parent_id: parentId })
     return res.data
   },
 
@@ -155,6 +201,25 @@ export const api = {
 
   async bulkUploadToDrive() {
     const res = await apiClient.post('/google-drive/bulk-upload')
+    return res.data
+  },
+
+  async syncCategoryFolder(categoryId: number) {
+    const res = await apiClient.post(`/google-drive/sync-folder/${categoryId}`)
+    return res.data
+  },
+
+  async disconnectDrive() {
+    const res = await apiClient.post('/google-drive/disconnect')
+    return res.data
+  },
+
+  async exportToGoogleSheets(categoryId?: number, status?: string, titlePrefix?: string): Promise<SheetsExportResponse> {
+    const res = await apiClient.post<SheetsExportResponse>('/google-drive/export-sheets', {
+      category_id: categoryId,
+      status: status || 'APPROVED',
+      title_prefix: titlePrefix || 'EventDhara Catalog',
+    })
     return res.data
   },
 
@@ -175,9 +240,24 @@ export const api = {
     return res.data
   },
 
-  // Settings
+  // Settings & API Key
   async getSystemSettings(): Promise<SystemSettings> {
     const res = await apiClient.get<SystemSettings>('/settings')
+    return res.data
+  },
+
+  async testGeminiConnection() {
+    const res = await apiClient.post('/settings/test-gemini')
+    return res.data
+  },
+
+  async updateGeminiApiKey(apiKey: string) {
+    const res = await apiClient.post('/settings/gemini-key', { api_key: apiKey })
+    return res.data
+  },
+
+  async removeGeminiApiKey() {
+    const res = await apiClient.delete('/settings/gemini-key')
     return res.data
   },
 

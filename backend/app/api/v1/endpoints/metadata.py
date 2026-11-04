@@ -16,6 +16,8 @@ def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
     faq = []
     keywords = []
     tags = []
+    custom_fields = {}
+
     try:
         if meta.inclusion:
             inclusion = json.loads(meta.inclusion) if isinstance(meta.inclusion, str) else meta.inclusion
@@ -40,6 +42,23 @@ def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
     except Exception:
         tags = [t.strip() for t in (meta.tags or "").split(",") if t.strip()]
 
+    try:
+        if meta.custom_fields:
+            custom_fields = json.loads(meta.custom_fields) if isinstance(meta.custom_fields, str) else meta.custom_fields
+    except Exception:
+        custom_fields = {}
+
+    photo_url = None
+    orig_filename = None
+    cat_name = None
+    status = "APPROVED"
+
+    if meta.image:
+        orig_filename = meta.image.original_filename
+        cat_name = meta.image.category.name if meta.image.category else "Unassigned"
+        status = meta.image.status
+        photo_url = meta.image.drive_url or f"https://drive.google.com/file/d/{meta.image.drive_file_id}/view" if meta.image.drive_file_id else f"/{meta.image.storage_path}"
+
     return MetadataResponse(
         id=meta.id,
         image_id=meta.image_id,
@@ -51,10 +70,16 @@ def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
         note=meta.note,
         keywords=keywords,
         tags=tags,
+        custom_fields=custom_fields,
         created_at=meta.created_at,
         updated_at=meta.updated_at,
-        image_filename=meta.image.original_filename if meta.image else None,
-        image_url=meta.image.storage_path if meta.image else None
+        image_filename=meta.image.filename if meta.image else None,
+        original_filename=orig_filename,
+        image_url=f"/{meta.image.storage_path}" if meta.image else None,
+        photo=photo_url,
+        category_name=cat_name,
+        approval_status=status,
+        processing_status="COMPLETED"
     )
 
 
@@ -81,6 +106,16 @@ def generate_metadata_endpoint(image_id: int, db: Session = Depends(get_db)):
     meta = service.generate_for_image(image_id)
     if not meta:
         raise HTTPException(status_code=400, detail="Failed to generate metadata or image is not APPROVED.")
+    return serialize_metadata_response(meta)
+
+
+@router.post("/regenerate/{image_id}", response_model=MetadataResponse)
+def regenerate_metadata_endpoint(image_id: int, db: Session = Depends(get_db)):
+    """Force regenerate AI metadata for an approved image."""
+    service = MetadataService(db)
+    meta = service.generate_for_image(image_id, force_regenerate=True)
+    if not meta:
+        raise HTTPException(status_code=400, detail="Failed to regenerate metadata.")
     return serialize_metadata_response(meta)
 
 
@@ -114,7 +149,7 @@ def bulk_generate_metadata(db: Session = Depends(get_db)):
 
     return {
         "success": True,
-        "total_attempted": len(pending_images),
+        "total_pending": len(pending_images),
         "completed": completed,
         "failed": failed
     }
