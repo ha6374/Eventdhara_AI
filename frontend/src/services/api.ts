@@ -15,7 +15,7 @@ import type {
 } from '@/types'
 
 const apiClient = axios.create({
-  baseURL: '/api/v1',
+  baseURL: 'https://eventdhara-ai.onrender.com',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -266,3 +266,4 @@ export const api = {
     return res.data
   },
 }
+
