@@ -1,3 +1,4 @@
+import { getImageUrl } from '@/lib/utils';
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -445,7 +446,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                   onClick={() => setViewerActiveIndex(index)}
                 >
                   <img
-                    src={`/${item.storage_path}`}
+                    src={getImageUrl(item.storage_path)}
                     alt={item.original_filename}
                     loading="lazy"
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -565,7 +566,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                   </td>
                   <td className="p-3">
                     <img
-                      src={`/${item.storage_path}`}
+                      src={getImageUrl(item.storage_path)}
                       alt={item.original_filename}
                       className="w-10 h-10 object-cover rounded cursor-pointer"
                       onClick={() => setViewerActiveIndex(index)}
@@ -579,13 +580,13 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                       {item.original_filename}
                     </button>
                   </td>
-                  <td className="p-3 text-slate-600">{item.category_name || '—'}</td>
+                  <td className="p-3 text-slate-600">{item.category_name || 'â€”'}</td>
                   <td className="p-3 font-mono">{item.width}x{item.height}</td>
                   <td className="p-3 font-mono">
-                    {item.blur_score ? item.blur_score.toFixed(1) : '—'}
+                    {item.blur_score ? item.blur_score.toFixed(1) : 'â€”'}
                   </td>
                   <td className="p-3 max-w-xs truncate text-[11px] text-slate-500">
-                    {item.rejection_reason || item.review_reason || '—'}
+                    {item.rejection_reason || item.review_reason || 'â€”'}
                   </td>
                   <td className="p-3 text-right space-x-1.5">
                     {status !== 'APPROVED' && (
@@ -669,7 +670,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
 
             <div className="flex items-center gap-2">
               <span className="hidden md:inline text-[11px] text-slate-400">
-                Shortcuts: ← Prev | → Next | Del Delete | Esc Close
+                Shortcuts: â† Prev | â†’ Next | Del Delete | Esc Close
               </span>
               <button
                 onClick={() => setViewerActiveIndex(null)}
@@ -695,7 +696,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
             {/* High-Resolution Center Image Preview */}
             <div className="max-h-[75vh] max-w-[85vw] flex items-center justify-center">
               <img
-                src={`/${activeImage.storage_path}`}
+                src={getImageUrl(activeImage.storage_path)}
                 alt={activeImage.original_filename}
                 className="max-h-[75vh] max-w-[85vw] object-contain rounded-lg shadow-2xl"
               />
@@ -716,7 +717,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
             <div className="flex flex-wrap items-center gap-4 text-slate-300">
               <span>Category: <strong className="text-white">{activeImage.category_name || 'Unassigned'}</strong></span>
               <span>Dimensions: <strong className="text-white">{activeImage.width}x{activeImage.height}</strong></span>
-              <span>Blur Score: <strong className="text-white">{activeImage.blur_score ? activeImage.blur_score.toFixed(1) : '—'}</strong></span>
+              <span>Blur Score: <strong className="text-white">{activeImage.blur_score ? activeImage.blur_score.toFixed(1) : 'â€”'}</strong></span>
               {activeImage.rejection_reason && (
                 <span className="text-rose-300 font-medium truncate max-w-md">
                   Reason: {activeImage.rejection_reason}

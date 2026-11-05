@@ -1,3 +1,4 @@
+import { getImageUrl } from '@/lib/utils';
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -285,7 +286,7 @@ export const GoogleDrivePage: React.FC = () => {
                   <tr key={item.id} className="hover:bg-slate-50/50 transition-colors">
                     <td className="py-3.5 px-6 font-medium text-slate-800 flex items-center gap-3">
                       <img
-                        src={`/${item.storage_path}`}
+                        src={getImageUrl(item.storage_path)}
                         alt={item.original_filename}
                         className="w-9 h-9 object-cover rounded-md border"
                       />

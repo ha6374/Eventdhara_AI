@@ -25,3 +25,23 @@ export function formatDate(dateString?: string | null) {
     minute: '2-digit',
   })
 }
+
+export function getImageUrl(path?: string | null): string {
+  if (!path) return '';
+
+  // Preserve external image URLs
+  if (/^https?:\/\//i.test(path)) return path;
+
+  const cleanPath = path.replace(/^\/+/, '');
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ||
+    (import.meta.env.PROD
+      ? 'https://eventdhara-ai.onrender.com/api/v1'
+      : '');
+
+  if (apiBaseUrl) {
+    const backendOrigin = new URL(apiBaseUrl).origin;
+    return `${backendOrigin}/${cleanPath}`;
+  }
+
+  return `/${cleanPath}`;
+}

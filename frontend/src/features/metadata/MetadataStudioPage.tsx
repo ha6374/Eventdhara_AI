@@ -1,3 +1,4 @@
+import { getImageUrl } from '@/lib/utils';
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -102,7 +103,7 @@ export const MetadataStudioPage: React.FC = () => {
   const handleOpenEdit = (meta: ImageMetadata) => {
     setSelectedMeta(meta)
     setEditName(meta.name)
-    setEditPhoto(meta.photo || meta.image_url || '')
+    setEditPhoto(getImageUrl(meta.photo || meta.image_url))
     setEditShortDesc(meta.short_description)
     setEditLongDesc(meta.long_description)
     setEditInclusions((meta.inclusion || []).join('\n'))
@@ -260,10 +261,10 @@ export const MetadataStudioPage: React.FC = () => {
 
                 <CardContent className="p-4 space-y-3 text-xs">
                   {/* Image preview thumbnail */}
-                  {meta.image_url && (
+                  {(meta.photo || meta.image_url) && (
                     <div className="h-36 bg-slate-100 rounded-lg overflow-hidden relative group">
                       <img
-                        src={meta.image_url}
+                        src={getImageUrl(meta.photo || meta.image_url)}
                         alt={meta.name}
                         className="w-full h-full object-cover"
                       />

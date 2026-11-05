@@ -1,3 +1,4 @@
+import { getImageUrl } from '@/lib/utils';
 import React from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -111,7 +112,7 @@ export const DuplicatePage: React.FC = () => {
                       {orig ? (
                         <div className="bg-slate-900 rounded-xl overflow-hidden aspect-video relative flex items-center justify-center">
                           <img
-                            src={`/${orig.storage_path}`}
+                            src={getImageUrl(orig.storage_path)}
                             alt={orig.original_filename}
                             className="w-full h-full object-contain"
                           />
@@ -145,7 +146,7 @@ export const DuplicatePage: React.FC = () => {
 
                       <div className="bg-slate-900 rounded-xl overflow-hidden aspect-video relative flex items-center justify-center border-2 border-purple-400">
                         <img
-                          src={`/${dup.storage_path}`}
+                          src={getImageUrl(dup.storage_path)}
                           alt={dup.original_filename}
                           className="w-full h-full object-contain"
                         />
