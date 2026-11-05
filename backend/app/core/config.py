@@ -1,4 +1,4 @@
-﻿import os
+import os
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,9 +18,20 @@ class Settings(BaseSettings):
     STORAGE_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage"))
     MAX_UPLOAD_SIZE_MB: int = 500
 
-    # Image Quality Check Thresholds
+    # ZIP Archive Safety Limits (Anti-ZipBomb & Memory Protection)
+    ZIP_MAX_FILES: int = 1000
+    ZIP_MAX_TOTAL_UNCOMPRESSED_MB: int = 2048
+    ZIP_MAX_FILE_SIZE_MB: int = 50
+    ZIP_MAX_COMPRESSION_RATIO: float = 100.0
+
+    # Image Quality & Safety Thresholds
     MIN_IMAGE_WIDTH: int = 800
     MIN_IMAGE_HEIGHT: int = 600
+    MAX_IMAGE_WIDTH: int = 12000
+    MAX_IMAGE_HEIGHT: int = 12000
+    MAX_IMAGE_PIXELS: int = 60_000_000  # 60 Megapixels max
+    OPENCV_MAX_PROCESSING_DIMENSION: int = 1920  # Max dimension for cv2 blur/lighting
+    BATCH_GC_INTERVAL: int = 10  # Frequency of garbage collection & session expiration
     MIN_FILE_SIZE_KB: int = 50
     BLUR_THRESHOLD: float = 100.0  # Variance of the Laplacian
     PHASH_THRESHOLD: int = 5       # Max Hamming distance for pHash duplicate match

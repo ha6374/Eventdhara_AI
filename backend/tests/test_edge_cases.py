@@ -46,6 +46,20 @@ def test_severely_underexposed_dark_image():
     # Mean pixel value ~ 5-15 (very dark) with spatial structure so pHash does not collapse to zero
     import numpy as np
     import uuid, time
+    from app.core.database import SessionLocal
+    from app.models.image import ImageItem
+    from app.services.category_storage import remove_image_from_storage
+
+    # Ensure clean slate from any prior test executions
+    _db = SessionLocal()
+    try:
+        for old in _db.query(ImageItem).filter(ImageItem.original_filename.ilike('%night_dark%')).all():
+            remove_image_from_storage(old)
+            _db.delete(old)
+        _db.commit()
+    finally:
+        _db.close()
+
     seed = int(time.time() * 1000) % (2**31 - 1)
     rng = np.random.RandomState(seed)
     dark_arr = np.zeros((700, 900, 3), dtype=np.uint8)
@@ -60,16 +74,27 @@ def test_severely_underexposed_dark_image():
     dark_img.save(buf, format="JPEG", quality=95)
 
     test_fn = f"night_dark_{uuid.uuid4().hex[:8]}.jpg"
-    res = client.post(
-        "/api/v1/uploads/images",
-        files={"files": (test_fn, buf.getvalue(), "image/jpeg")}
-    )
-    assert res.status_code == 200
-    items = res.json()["processed_items"]
-    assert len(items) > 0
-    # Should be rejected due to severe underexposure
-    assert items[0]["status"] == "REJECTED"
-    assert "dark" in items[0]["rejection_reason"].lower() or "underexposure" in items[0]["rejection_reason"].lower()
+    try:
+        res = client.post(
+            "/api/v1/uploads/images",
+            files={"files": (test_fn, buf.getvalue(), "image/jpeg")}
+        )
+        assert res.status_code == 200
+        items = res.json()["processed_items"]
+        assert len(items) > 0
+        # Should be rejected due to severe underexposure
+        assert items[0]["status"] == "REJECTED"
+        assert "dark" in items[0]["rejection_reason"].lower() or "underexposure" in items[0]["rejection_reason"].lower()
+    finally:
+        _db2 = SessionLocal()
+        try:
+            created = _db2.query(ImageItem).filter(ImageItem.original_filename == test_fn).first()
+            if created:
+                remove_image_from_storage(created)
+                _db2.delete(created)
+                _db2.commit()
+        finally:
+            _db2.close()
 
 
 def test_mobile_screenshot_aspect_ratio_rejection():

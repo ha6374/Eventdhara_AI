@@ -28,35 +28,37 @@ class ImageRepository:
         return self.db.query(ImageItem).filter(ImageItem.sha256 == sha256_hash).first()
 
     def find_duplicate_by_phash(self, target_phash_hex: str, max_distance: int = 5) -> Optional[Tuple[ImageItem, float]]:
-        """Compare pHash against database using hamming distance"""
+        """Compare pHash against database using hamming distance with lightweight tuple querying to prevent ORM memory bloat."""
         try:
             target_hash = imagehash.hex_to_hash(target_phash_hex)
         except Exception:
             return None
 
-        # Fetch candidates with valid phashes
+        # Fetch lightweight (id, phash) tuples only, avoiding instantiating heavy ORM objects in session memory
         candidates = (
-            self.db.query(ImageItem)
-            .filter(ImageItem.phash != None, ImageItem.phash != "")
+            self.db.query(ImageItem.id, ImageItem.phash)
+            .filter(ImageItem.phash.isnot(None), ImageItem.phash != "")
             .all()
         )
-        best_match = None
+        best_match_id = None
         min_dist = float("inf")
 
-        for item in candidates:
+        for item_id, item_phash in candidates:
             try:
-                candidate_hash = imagehash.hex_to_hash(item.phash)
+                candidate_hash = imagehash.hex_to_hash(item_phash)
                 dist = target_hash - candidate_hash  # Hamming distance
                 if dist <= max_distance and dist < min_dist:
                     min_dist = dist
-                    best_match = item
+                    best_match_id = item_id
             except Exception:
                 continue
 
-        if best_match:
-            # Hash size is 64 bits. Similarity % = (1 - (dist / 64)) * 100
-            similarity = max(0.0, (1.0 - (min_dist / 64.0)) * 100.0)
-            return best_match, similarity
+        if best_match_id is not None:
+            best_match = self.get_by_id(best_match_id)
+            if best_match:
+                # Hash size is 64 bits. Similarity % = (1 - (dist / 64)) * 100
+                similarity = max(0.0, (1.0 - (min_dist / 64.0)) * 100.0)
+                return best_match, similarity
 
         return None
 

@@ -8,8 +8,18 @@ from typing import Dict, Any, Optional, Tuple
 from PIL import Image
 import cv2
 import numpy as np
+
+# Restrict OpenCV to single-threaded execution to prevent thread pool memory overhead and fragmentation on Render
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
 from sqlalchemy.orm import Session
 from app.core.config import settings
+
+# Configure PIL decompression bomb protection from settings
+Image.MAX_IMAGE_PIXELS = getattr(settings, "MAX_IMAGE_PIXELS", 60_000_000)
 from app.models.image import ImageItem
 from app.models.category import Category
 from app.models.audit import AuditLog
@@ -33,26 +43,67 @@ class ProcessingService:
         self.dup_service = DuplicateService(db)
         self.feedback_service = FeedbackLearningService(db)
 
-    def compute_blur_score(self, file_path: str) -> float:
-        """Computes variance of the Laplacian using OpenCV."""
+    def _load_optimized_grayscale(self, file_path: str) -> Optional[np.ndarray]:
+        """Loads image as grayscale with controlled max dimension to prevent memory blowups."""
         try:
             img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
             if img is None:
+                return None
+            h, w = img.shape[:2]
+            max_dim = max(h, w)
+            max_allowed = getattr(settings, "OPENCV_MAX_PROCESSING_DIMENSION", 1920)
+            if max_dim > max_allowed:
+                scale = max_allowed / float(max_dim)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                del img
+                return resized
+            return img
+        except Exception as e:
+            logger.warning("Failed loading grayscale image for %s: %s", file_path, e)
+            return None
+
+    def compute_blur_score(self, file_path: str, preloaded_gray: Optional[np.ndarray] = None) -> float:
+        """Computes variance of the Laplacian using OpenCV with memory-optimized CV_32F."""
+        img = None
+        should_del = False
+        try:
+            if preloaded_gray is not None:
+                img = preloaded_gray
+            else:
+                img = self._load_optimized_grayscale(file_path)
+                should_del = True
+
+            if img is None or img.size == 0:
                 return 0.0
-            variance = cv2.Laplacian(img, cv2.CV_64F).var()
-            return float(variance)
+
+            laplacian = cv2.Laplacian(img, cv2.CV_32F)
+            variance = float(laplacian.var())
+            del laplacian
+            return variance
         except Exception as e:
             logger.warning("Error computing blur score for %s: %s", file_path, e)
             return 0.0
+        finally:
+            if should_del and img is not None:
+                del img
 
-    def check_lighting_quality(self, file_path: str) -> Tuple[bool, Optional[str], float]:
+    def check_lighting_quality(self, file_path: str, preloaded_gray: Optional[np.ndarray] = None) -> Tuple[bool, Optional[str], float]:
         """
         Detects underexposed (dark) or overexposed (blown out) photography.
         Returns (is_acceptable, rejection_or_review_reason, mean_brightness).
         """
+        img = None
+        should_del = False
         try:
-            img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-            if img is None:
+            if preloaded_gray is not None:
+                img = preloaded_gray
+            else:
+                img = self._load_optimized_grayscale(file_path)
+                should_del = True
+
+            if img is None or img.size == 0:
                 return True, None, 128.0
 
             mean_val = float(np.mean(img))
@@ -64,6 +115,9 @@ class ProcessingService:
         except Exception as e:
             logger.warning("Error checking lighting for %s: %s", file_path, e)
             return True, None, 128.0
+        finally:
+            if should_del and img is not None:
+                del img
 
     def detect_screenshot(self, file_path: str, width: int, height: int) -> Tuple[bool, float]:
         """
@@ -79,28 +133,39 @@ class ProcessingService:
 
         return False, aspect_ratio
 
-    def detect_watermark(self, file_path: str) -> Tuple[bool, float]:
+    def detect_watermark(self, file_path: str, preloaded_gray: Optional[np.ndarray] = None) -> Tuple[bool, float]:
         """
         Inspects bottom banner and corner regions for edge density indicating watermarks/overlays.
+        Loads grayscale directly to avoid full-resolution 3-channel BGR allocation.
         """
+        img = None
+        should_del = False
         try:
-            img = cv2.imread(file_path)
-            if img is None:
+            if preloaded_gray is not None:
+                img = preloaded_gray
+            else:
+                img = self._load_optimized_grayscale(file_path)
+                should_del = True
+
+            if img is None or img.size == 0:
                 return False, 0.0
 
             h, w = img.shape[:2]
             bottom_strip = img[int(h * 0.85):h, :]
-            gray = cv2.cvtColor(bottom_strip, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 100, 200)
+            edges = cv2.Canny(bottom_strip, 100, 200)
             edge_density = np.sum(edges > 0) / float(edges.size)
+            del edges
             has_watermark = edge_density > 0.12
             return has_watermark, float(edge_density)
         except Exception as e:
             logger.warning("Error detecting watermark for %s: %s", file_path, e)
             return False, 0.0
+        finally:
+            if should_del and img is not None:
+                del img
 
     def validate_file(self, file_path: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
-        """STEP 1: File Validation (format, integrity, dimensions, size)."""
+        """STEP 1: File Validation (format, integrity, dimensions, size, pixel limits)."""
         if not os.path.exists(file_path):
             return False, "File does not exist on disk", {}
 
@@ -121,11 +186,23 @@ class ProcessingService:
                 if img_format not in SUPPORTED_FORMATS:
                     return False, f"Unsupported image format: {img_format}. Allowed: {', '.join(SUPPORTED_FORMATS)}", {}
 
+                # Check max dimensions to prevent memory exhaustion
+                max_w = getattr(settings, "MAX_IMAGE_WIDTH", 12000)
+                max_h = getattr(settings, "MAX_IMAGE_HEIGHT", 12000)
+                if width > max_w or height > max_h:
+                    return False, f"Image dimensions ({width}x{height}) exceed maximum allowed limit ({max_w}x{max_h})", {}
+
+                total_pixels = width * height
+                max_pixels = getattr(settings, "MAX_IMAGE_PIXELS", 60_000_000)
+                if total_pixels > max_pixels:
+                    return False, f"Image pixel count ({total_pixels:,}) exceeds maximum limit ({max_pixels:,})", {}
+
                 # Verify image integrity (not corrupted)
                 img.verify()
 
-            # Re-open after verify to ensure full decodability
+            # Re-open after verify to ensure decodability without keeping unneeded pixel buffers in RAM
             with Image.open(file_path) as img:
+                img.draft(None, (min(width, 1000), min(height, 1000)))
                 img.load()
 
             if width < settings.MIN_IMAGE_WIDTH or height < settings.MIN_IMAGE_HEIGHT:
@@ -137,6 +214,8 @@ class ProcessingService:
                 "height": height,
                 "format": img_format,
             }
+        except Image.DecompressionBombError as e:
+            return False, f"Image rejected as potential decompression bomb: {str(e)}", {}
         except Exception as e:
             return False, f"Corrupted or invalid image file: {str(e)}", {}
 
@@ -203,9 +282,14 @@ class ProcessingService:
         is_dup, dup_origin, similarity, dup_type = self.dup_service.check_global_duplicate(sha256_hash, phash_str)
 
         # STEP 3: QUALITY & PHYSICAL CHECKS
-        blur_score = self.compute_blur_score(dest_path)
-        has_watermark, wm_density = self.detect_watermark(dest_path)
-        lighting_ok, lighting_err, mean_lum = self.check_lighting_quality(dest_path)
+        shared_gray = self._load_optimized_grayscale(dest_path)
+        try:
+            blur_score = self.compute_blur_score(dest_path, preloaded_gray=shared_gray)
+            has_watermark, wm_density = self.detect_watermark(dest_path, preloaded_gray=shared_gray)
+            lighting_ok, lighting_err, mean_lum = self.check_lighting_quality(dest_path, preloaded_gray=shared_gray)
+        finally:
+            if shared_gray is not None:
+                del shared_gray
         is_screenshot, aspect_ratio = self.detect_screenshot(dest_path, meta["width"], meta["height"])
 
         quality_passed = (blur_score >= settings.BLUR_THRESHOLD) and (not has_watermark) and lighting_ok and (not is_screenshot)

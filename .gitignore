@@ -67,3 +67,6 @@ __pycache__/
 **/token.json
 
 storage/EventDhara/*
+
+!frontend/src/lib/
+!frontend/src/lib/**

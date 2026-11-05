@@ -26,6 +26,7 @@ class DuplicateService:
 
     @staticmethod
     def compute_phash(file_path: str) -> str:
+        img = None
         try:
             with Image.open(file_path) as img:
                 h = imagehash.phash(img)
@@ -33,6 +34,13 @@ class DuplicateService:
         except Exception as e:
             logger.error("Failed to calculate pHash for %s: %s", file_path, e)
             return ""
+        finally:
+            if img is not None:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+                del img
 
     def check_global_duplicate(
         self,

@@ -174,6 +174,35 @@ class GeminiService:
                 "message": msg
             }
 
+    def _prepare_gemini_image_bytes(self, image_path: str) -> bytes:
+        """
+        Prepares compact image bytes for the Gemini Vision API.
+        If the file exceeds 1.5MB or 1600px, it generates an optimized in-memory JPEG
+        to drastically reduce network payload, RAM consumption, and latency.
+        """
+        import io
+        file_size = os.path.getsize(image_path)
+        if file_size > 1.5 * 1024 * 1024:
+            try:
+                with Image.open(image_path) as pil_img:
+                    if pil_img.mode not in ("RGB", "L"):
+                        pil_img = pil_img.convert("RGB")
+                    w, h = pil_img.size
+                    max_dim = max(w, h)
+                    if max_dim > 1600:
+                        scale = 1600.0 / float(max_dim)
+                        pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format="JPEG", quality=85, optimize=True)
+                    data = buf.getvalue()
+                    buf.close()
+                    return data
+            except Exception as e:
+                logger.warning("Failed optimizing image for Gemini (%s), sending direct file bytes", e)
+
+        with open(image_path, "rb") as f:
+            return f.read()
+
     def classify_image(
         self,
         image_path: str,
@@ -193,8 +222,7 @@ class GeminiService:
         try:
             from google.genai import types
 
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+            image_bytes = self._prepare_gemini_image_bytes(image_path)
 
             user_prompt = f"Uploaded Category: '{clean_uploaded}'. "
             if historical_feedback_context:
@@ -276,8 +304,7 @@ class GeminiService:
         try:
             from google.genai import types
 
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+            image_bytes = self._prepare_gemini_image_bytes(image_path)
 
             prompt = (
                 f"Category: {category_name}. Subcategory: {subcategory_name}. "

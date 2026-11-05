@@ -1,8 +1,11 @@
 import os
+import gc
+import zlib
 import uuid
 import zipfile
 import shutil
 import logging
+import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -27,22 +30,78 @@ def is_safe_zip_path(target_dir: str, member_path: str) -> bool:
     return dest_path.startswith(target_abs + os.sep) or dest_path == target_abs
 
 
-def resolve_category_from_zip_path(db: Session, member_path: str) -> Optional[int]:
-    """Resolves matching category from directory path inside a ZIP archive."""
+def resolve_category_from_zip_path(
+    db: Session,
+    member_path: str,
+    cache: Optional[dict] = None
+) -> Optional[int]:
+    """Resolves matching category from directory path inside a ZIP archive with optional memory cache."""
     norm_path = member_path.replace("\\", "/").strip("/")
     parts = norm_path.split("/")
     if len(parts) <= 1:
         return None
+    dir_path = "/".join(parts[:-1]).strip().lower()
+    if not dir_path:
+        return None
+    if cache is not None and dir_path in cache:
+        return cache[dir_path]
+
     from app.models.category import Category
     folder_parts = parts[:-1]
+    matched_id = None
     for folder_name in reversed(folder_parts):
         cleaned = folder_name.strip()
+        if not cleaned:
+            continue
         matched = db.query(Category).filter(Category.name.ilike(cleaned)).first()
         if not matched:
             matched = db.query(Category).filter(Category.name.ilike(f"%{cleaned}%")).first()
         if matched:
-            return matched.id
-    return None
+            matched_id = matched.id
+            break
+
+    if cache is not None:
+        cache[dir_path] = matched_id
+    return matched_id
+
+
+def cleanup_batch_memory(db: Session, batch: UploadBatch):
+    """
+    Safely commits pending work and expunges processed image and audit items
+    from SQLAlchemy's identity map while preserving the active batch in session.
+    """
+    db.commit()
+    for obj in list(db.identity_map.values()):
+        if obj is not batch:
+            db.expunge(obj)
+    if "images" in batch.__dict__:
+        batch.__dict__.pop("images", None)
+    gc.collect()
+
+
+def finalize_batch(
+    db: Session,
+    batch: UploadBatch,
+    status: str,
+    valid_count: Optional[int] = None,
+    invalid_count: Optional[int] = None,
+    error_message: Optional[str] = None
+):
+    """
+    Safely re-attaches batch if needed and persists final status, counts, and timestamps to PostgreSQL.
+    """
+    if batch not in db:
+        batch = db.merge(batch)
+    batch.status = status
+    if valid_count is not None:
+        batch.valid_files = valid_count
+    if invalid_count is not None:
+        batch.invalid_files = invalid_count
+    if error_message is not None:
+        batch.error_message = error_message
+    if status in ("COMPLETED", "FAILED"):
+        batch.completed_at = datetime.datetime.utcnow()
+    db.commit()
 
 
 @router.post("/images", response_model=UploadResultResponse)
@@ -106,10 +165,13 @@ async def upload_multiple_images(
                 if os.path.exists(temp_dest):
                     os.remove(temp_dest)
 
-        batch.valid_files = valid_count
-        batch.invalid_files = invalid_count
-        batch.status = "COMPLETED"
-        db.commit()
+            # Periodic session cleanup and GC to control RAM usage while preserving active batch
+            if (valid_count + invalid_count) % getattr(settings, "BATCH_GC_INTERVAL", 10) == 0:
+                cleanup_batch_memory(db, batch)
+
+        finalize_batch(db, batch, status="COMPLETED", valid_count=valid_count, invalid_count=invalid_count)
+        db.expunge_all()
+        gc.collect()
 
     finally:
         if os.path.exists(temp_batch_dir):
@@ -156,10 +218,24 @@ async def upload_zip_stream(
     db.add(batch)
     db.commit()
 
-    # Stream ZIP directly to disk
-    with open(zip_path, "wb") as buffer:
-        while chunk := await file.read(2 * 1024 * 1024):  # 2MB chunks
-            buffer.write(chunk)
+    # Stream ZIP directly to disk with upload size protection
+    max_upload_bytes = getattr(settings, "MAX_UPLOAD_SIZE_MB", 500) * 1024 * 1024
+    total_streamed = 0
+    try:
+        with open(zip_path, "wb") as buffer:
+            while chunk := await file.read(2 * 1024 * 1024):  # 2MB chunks
+                total_streamed += len(chunk)
+                if total_streamed > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Uploaded ZIP exceeds maximum size limit of {settings.MAX_UPLOAD_SIZE_MB} MB."
+                    )
+                buffer.write(chunk)
+    except HTTPException as e:
+        finalize_batch(db, batch, status="FAILED", error_message=e.detail)
+        shutil.rmtree(temp_zip_dir, ignore_errors=True)
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+        raise
 
     processor = ProcessingService(db)
     valid_count = 0
@@ -171,15 +247,50 @@ async def upload_zip_stream(
             raise zipfile.BadZipFile("Uploaded file header does not match ZIP format")
 
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            # Check for corrupted archive
-            bad_file = zip_ref.testzip()
-            if bad_file:
-                raise zipfile.BadZipFile(f"Corrupted entry encountered in ZIP: {bad_file}")
-
             members = zip_ref.infolist()
+
+            # Safety Limit 1: Maximum number of archive entries
+            max_files = getattr(settings, "ZIP_MAX_FILES", 1000)
+            if len(members) > max_files:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"ZIP archive contains {len(members)} entries, exceeding the maximum allowed limit of {max_files}."
+                )
+
+            # Safety Limits 2 & 3: Total uncompressed size, entry size, and ZIP bomb protection
+            max_total_uncompressed = getattr(settings, "ZIP_MAX_TOTAL_UNCOMPRESSED_MB", 2048) * 1024 * 1024
+            max_entry_size = getattr(settings, "ZIP_MAX_FILE_SIZE_MB", 50) * 1024 * 1024
+            max_ratio = getattr(settings, "ZIP_MAX_COMPRESSION_RATIO", 100.0)
+
+            total_uncompressed = 0
+            total_compressed = 0
+
+            for member in members:
+                if member.file_size > max_entry_size:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"ZIP entry '{member.filename}' uncompressed size ({member.file_size / (1024 * 1024):.1f} MB) exceeds maximum allowed limit of {settings.ZIP_MAX_FILE_SIZE_MB} MB."
+                    )
+                total_uncompressed += member.file_size
+                total_compressed += member.compress_size
+
+            if total_uncompressed > max_total_uncompressed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Total uncompressed ZIP contents ({total_uncompressed / (1024 * 1024):.1f} MB) exceed maximum allowed limit of {settings.ZIP_MAX_TOTAL_UNCOMPRESSED_MB} MB."
+                )
+
+            if total_compressed > 0 and (total_uncompressed / total_compressed) > max_ratio:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"ZIP archive rejected: excessive compression ratio ({total_uncompressed / total_compressed:.1f}:1) detected as potential ZIP bomb."
+                )
+
             batch.total_files = len(members)
             batch.status = "PROCESSING"
             db.commit()
+
+            category_cache: dict = {}
 
             for member in members:
                 # Skip directory entries
@@ -195,7 +306,7 @@ async def upload_zip_stream(
                 basename = os.path.basename(member.filename)
                 ext = os.path.splitext(basename)[1].lower()
 
-                # Ignore macOS metadata or non-images
+                # Ignore macOS metadata
                 if basename.startswith(".") or basename.startswith("__MACOSX"):
                     continue
 
@@ -203,14 +314,25 @@ async def upload_zip_stream(
                     invalid_count += 1
                     continue
 
-                # Streaming member extraction
+                # Streaming member extraction with per-entry corruption resilience
                 extracted_file_path = os.path.join(extracted_dir, f"{uuid.uuid4()}{ext}")
-                with zip_ref.open(member) as source, open(extracted_file_path, "wb") as target:
-                    shutil.copyfileobj(source, target)
+                try:
+                    with zip_ref.open(member) as source, open(extracted_file_path, "wb") as target:
+                        while chunk := source.read(65536):
+                            target.write(chunk)
+                except (zipfile.BadZipFile, zlib.error, RuntimeError, IOError) as extract_err:
+                    logger.warning("Corrupted entry encountered in ZIP '%s': %s", member.filename, extract_err)
+                    invalid_count += 1
+                    if os.path.exists(extracted_file_path):
+                        try:
+                            os.remove(extracted_file_path)
+                        except Exception:
+                            pass
+                    continue
 
                 try:
                     # Resolve category from explicit selection or internal ZIP directory hierarchy
-                    effective_cat_id = category_id or resolve_category_from_zip_path(db, member.filename)
+                    effective_cat_id = category_id or resolve_category_from_zip_path(db, member.filename, category_cache)
 
                     processed_image = processor.process_image(
                         source_file_path=extracted_file_path,
@@ -228,24 +350,34 @@ async def upload_zip_stream(
                     invalid_count += 1
                 finally:
                     if os.path.exists(extracted_file_path):
-                        os.remove(extracted_file_path)
+                        try:
+                            os.remove(extracted_file_path)
+                        except Exception:
+                            pass
 
-        batch.valid_files = valid_count
-        batch.invalid_files = invalid_count
-        batch.status = "COMPLETED"
-        db.commit()
+                # Periodic session identity map cleanup and garbage collection while preserving active batch
+                if (valid_count + invalid_count) % getattr(settings, "BATCH_GC_INTERVAL", 10) == 0:
+                    cleanup_batch_memory(db, batch)
 
+        finalize_batch(db, batch, status="COMPLETED", valid_count=valid_count, invalid_count=invalid_count)
+        db.expunge_all()
+        gc.collect()
+
+    except HTTPException as e:
+        logger.warning("ZIP upload rejected: %s", e.detail)
+        finalize_batch(db, batch, status="FAILED", error_message=e.detail)
+        raise e
+    except MemoryError as e:
+        logger.critical("MemoryError encountered while processing ZIP: %s", e)
+        finalize_batch(db, batch, status="FAILED", error_message="Server memory limit exceeded during ZIP processing.")
+        raise HTTPException(status_code=503, detail="Server memory limit reached while processing ZIP archive.")
     except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
         logger.error("Corrupted or invalid ZIP file: %s", e)
-        batch.status = "FAILED"
-        batch.error_message = f"Corrupted or invalid ZIP archive: {str(e)}"
-        db.commit()
+        finalize_batch(db, batch, status="FAILED", error_message=f"Corrupted or invalid ZIP archive: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Corrupted or invalid ZIP archive: {str(e)}")
     except Exception as e:
         logger.error("Failed extracting ZIP file: %s", e)
-        batch.status = "FAILED"
-        batch.error_message = str(e)
-        db.commit()
+        finalize_batch(db, batch, status="FAILED", error_message=str(e))
         raise HTTPException(status_code=500, detail=f"Error processing ZIP archive: {str(e)}")
     finally:
         shutil.rmtree(temp_zip_dir, ignore_errors=True)
