@@ -1,3 +1,4 @@
+from sqlalchemy import text
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -73,14 +74,31 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.get("/health", tags=["Health"])
 def health_check():
-    return {
-        "status": "healthy",
-        "service": settings.APP_NAME,
-        "environment": settings.ENVIRONMENT,
-        "database": "connected"
-    }
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
 
+        return {
+            "status": "healthy",
+            "service": settings.APP_NAME,
+            "environment": settings.ENVIRONMENT,
+            "database": "connected",
+            "database_engine": engine.dialect.name
+        }
 
+    except Exception:
+        logger.exception("Database health check failed")
+
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": settings.APP_NAME,
+                "environment": settings.ENVIRONMENT,
+                "database": "disconnected",
+                "database_engine": engine.dialect.name
+            }
+        )
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error("Unhandled Exception on %s: %s", request.url.path, exc, exc_info=True)
