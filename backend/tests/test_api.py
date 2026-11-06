@@ -28,3 +28,15 @@ def test_category_endpoints():
     tree = response.json()
     assert isinstance(tree, list)
     assert len(tree) >= 4
+
+
+def test_image_placeholder_and_file_fallback():
+    # 1. Non-existent image returns 404
+    resp = client.get("/api/v1/images/99999999/file")
+    assert resp.status_code == 404
+
+    # 2. Placeholder endpoint returns valid SVG
+    resp_svg = client.get("/api/v1/images/99999999/placeholder")
+    assert resp_svg.status_code == 200
+    assert "image/svg+xml" in resp_svg.headers.get("content-type", "")
+    assert "<svg" in resp_svg.text

@@ -22,6 +22,7 @@ class ImageResponse(BaseModel):
     original_filename: str
     file_path: str
     storage_path: str
+    file_url: Optional[str] = None
     file_size: int
     width: int
     height: int

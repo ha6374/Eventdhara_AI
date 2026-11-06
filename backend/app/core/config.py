@@ -1,5 +1,5 @@
 import os
-from typing import List, Union
+from typing import List, Union, Optional
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -53,16 +53,30 @@ class Settings(BaseSettings):
     GOOGLE_DRIVE_TOKEN_JSON: str = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "token.json")
     )
+
+    # Dynamic Google Sheets OAuth 2.0 Integration
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "https://eventdhara-ai.onrender.com/api/v1/sheets/oauth/callback"
+    GOOGLE_TOKEN_ENCRYPTION_KEY: str = ""
+    BACKEND_PUBLIC_URL: str = "https://eventdhara-ai.onrender.com"
+
     # CORS
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://eventdhara-ai-1.onrender.com",
     ]
 
     @field_validator("STORAGE_ROOT", mode="before")
-    def resolve_storage_root(cls, v: str) -> str:
+    def resolve_storage_root(cls, v: Optional[str] = None) -> str:
+        if v and isinstance(v, str) and v.strip():
+            cleaned = v.strip()
+            if os.path.isabs(cleaned):
+                return cleaned
+            return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", cleaned))
         project_storage = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage"))
         return project_storage
 
@@ -90,5 +104,5 @@ settings = Settings()
 
 # Ensure storage directories exist
 os.makedirs(settings.STORAGE_ROOT, exist_ok=True)
-for sub in ["uploads", "extracted", "processed", "approved", "rejected", "duplicates", "exports"]:
+for sub in ["uploads", "extracted", "processed", "approved", "rejected", "duplicates", "exports", "EventDhara"]:
     os.makedirs(os.path.join(settings.STORAGE_ROOT, sub), exist_ok=True)

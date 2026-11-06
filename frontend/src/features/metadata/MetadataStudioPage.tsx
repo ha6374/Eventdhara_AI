@@ -1,5 +1,6 @@
-import { getImageUrl } from '@/lib/utils';
-import React, { useState } from 'react'
+import { getImageUrl, getReliableImageUrl } from '@/lib/utils';
+import { SafeImage } from '@/components/ui/SafeImage';
+import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   FileSpreadsheet,
@@ -24,11 +25,21 @@ import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { Modal } from '@/components/ui/Modal'
 import { formatDate } from '@/lib/utils'
+import { GoogleSheetsSection } from '@/features/google-drive/GoogleSheetsSection'
 
 export const MetadataStudioPage: React.FC = () => {
   const queryClient = useQueryClient()
   const [selectedMeta, setSelectedMeta] = useState<ImageMetadata | null>(null)
   const [editModalOpen, setEditModalOpen] = useState(false)
+  const [showSheetsConfig, setShowSheetsConfig] = useState(false)
+
+  // Auto-expand if returning from OAuth callback
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('sheets_connected') === 'true') {
+      setShowSheetsConfig(true)
+    }
+  }, [])
 
   // Edit form states for all 9 fields
   const [editName, setEditName] = useState('')
@@ -206,13 +217,12 @@ export const MetadataStudioPage: React.FC = () => {
           </Button>
           <Button
             size="sm"
-            variant="outline"
-            onClick={() => exportSheetsMutation.mutate()}
-            isLoading={exportSheetsMutation.isPending}
-            className="gap-2"
+            variant={showSheetsConfig ? "primary" : "outline"}
+            onClick={() => setShowSheetsConfig(!showSheetsConfig)}
+            className={`gap-2 ${showSheetsConfig ? 'bg-emerald-700 text-white hover:bg-emerald-800' : 'text-emerald-700 border-emerald-300 hover:bg-emerald-50'}`}
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            Export to Google Sheets
+            {showSheetsConfig ? "Hide Sheets Integration" : "Google Sheets Integration"}
           </Button>
           <a href="/api/v1/reports/export?format=excel&status=APPROVED" download>
             <Button variant="outline" size="sm" className="gap-2">
@@ -222,6 +232,17 @@ export const MetadataStudioPage: React.FC = () => {
           </a>
         </div>
       </div>
+
+      {/* Dynamic Google Sheets Integration Section */}
+      {showSheetsConfig && (
+        <div className="mb-6">
+          <GoogleSheetsSection
+            onSyncSuccess={() => {
+              refetch()
+            }}
+          />
+        </div>
+      )}
 
       {/* Main Grid */}
       {isLoading ? (
@@ -263,8 +284,10 @@ export const MetadataStudioPage: React.FC = () => {
                   {/* Image preview thumbnail */}
                   {(meta.photo || meta.image_url) && (
                     <div className="h-36 bg-slate-100 rounded-lg overflow-hidden relative group">
-                      <img
-                        src={getImageUrl(meta.photo || meta.image_url)}
+                      <SafeImage
+                        src={getReliableImageUrl({ id: meta.image_id, drive_url: meta.photo, storage_path: meta.image_url })}
+                        fallbackSrc={getImageUrl(meta.photo || meta.image_url)}
+                        imageId={meta.image_id}
                         alt={meta.name}
                         className="w-full h-full object-cover"
                       />

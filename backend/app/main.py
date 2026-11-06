@@ -1,4 +1,4 @@
-﻿from sqlalchemy import text
+from sqlalchemy import text
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import Base, engine, SessionLocal
+import app.models
 from app.api.v1.api import api_router
 from app.services.category_service import CategoryService
 
@@ -55,9 +56,10 @@ app = FastAPI(
 )
 
 # CORS Middleware
+cors_origins = list(set(settings.CORS_ORIGINS + ["https://eventdhara-ai-1.onrender.com", "http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:5173", "http://127.0.0.1:5173"]))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://eventdhara-ai-1.onrender.com", "http://localhost:5173"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

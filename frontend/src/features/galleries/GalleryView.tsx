@@ -1,4 +1,5 @@
-import { getImageUrl } from '@/lib/utils';
+import { getImageUrl, getReliableImageUrl } from '@/lib/utils';
+import { SafeImage } from '@/components/ui/SafeImage';
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -445,8 +446,10 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                   className="aspect-square bg-slate-100 overflow-hidden relative cursor-pointer"
                   onClick={() => setViewerActiveIndex(index)}
                 >
-                  <img
-                    src={getImageUrl(item.storage_path)}
+                  <SafeImage
+                    src={getReliableImageUrl(item)}
+                    fallbackSrc={getImageUrl(item.storage_path)}
+                    imageId={item.id}
                     alt={item.original_filename}
                     loading="lazy"
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
@@ -565,11 +568,14 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                     />
                   </td>
                   <td className="p-3">
-                    <img
-                      src={getImageUrl(item.storage_path)}
+                    <SafeImage
+                      src={getReliableImageUrl(item)}
+                      fallbackSrc={getImageUrl(item.storage_path)}
+                      imageId={item.id}
                       alt={item.original_filename}
                       className="w-10 h-10 object-cover rounded cursor-pointer"
                       onClick={() => setViewerActiveIndex(index)}
+                      showMissingBadge={false}
                     />
                   </td>
                   <td className="p-3 font-medium text-slate-900">
@@ -695,10 +701,13 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
 
             {/* High-Resolution Center Image Preview */}
             <div className="max-h-[75vh] max-w-[85vw] flex items-center justify-center">
-              <img
-                src={getImageUrl(activeImage.storage_path)}
+              <SafeImage
+                src={getReliableImageUrl(activeImage)}
+                fallbackSrc={getImageUrl(activeImage.storage_path)}
+                imageId={activeImage.id}
                 alt={activeImage.original_filename}
                 className="max-h-[75vh] max-w-[85vw] object-contain rounded-lg shadow-2xl"
+                containerClassName="min-w-[320px] min-h-[240px]"
               />
             </div>
 

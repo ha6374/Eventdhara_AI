@@ -5,6 +5,7 @@ from app.models.image import ImageItem
 from app.models.metadata import ImageMetadata
 from app.models.audit import AuditLog
 from app.models.feedback import RejectionFeedback, CategoryFeedbackInsight
+from app.models.sheets_config import GoogleSheetsConfig
 
 __all__ = [
     "Base",
@@ -14,5 +15,6 @@ __all__ = [
     "ImageMetadata",
     "AuditLog",
     "RejectionFeedback",
-    "CategoryFeedbackInsight"
+    "CategoryFeedbackInsight",
+    "GoogleSheetsConfig"
 ]

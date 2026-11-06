@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     duplicates,
     metadata,
     drive,
+    sheets,
     reports,
     settings as settings_ep
 )
@@ -22,5 +23,6 @@ api_router.include_router(images.router, prefix="/images", tags=["Image Operatio
 api_router.include_router(duplicates.router, prefix="/duplicates", tags=["Duplicate Center"])
 api_router.include_router(metadata.router, prefix="/metadata", tags=["Metadata Studio"])
 api_router.include_router(drive.router, prefix="/google-drive", tags=["Google Drive Cloud"])
+api_router.include_router(sheets.router, prefix="/sheets", tags=["Dynamic Google Sheets"])
 api_router.include_router(reports.router, prefix="/reports", tags=["Analytics & Reports"])
 api_router.include_router(settings_ep.router, prefix="/settings", tags=["System Settings"])

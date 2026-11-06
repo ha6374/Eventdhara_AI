@@ -1,4 +1,5 @@
-import { getImageUrl } from '@/lib/utils';
+import { getImageUrl, getReliableImageUrl } from '@/lib/utils';
+import { SafeImage } from '@/components/ui/SafeImage';
 import React from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -111,8 +112,10 @@ export const DuplicatePage: React.FC = () => {
 
                       {orig ? (
                         <div className="bg-slate-900 rounded-xl overflow-hidden aspect-video relative flex items-center justify-center">
-                          <img
-                            src={getImageUrl(orig.storage_path)}
+                          <SafeImage
+                            src={getReliableImageUrl(orig)}
+                            fallbackSrc={getImageUrl(orig.storage_path)}
+                            imageId={orig.id}
                             alt={orig.original_filename}
                             className="w-full h-full object-contain"
                           />
@@ -145,8 +148,10 @@ export const DuplicatePage: React.FC = () => {
                       </div>
 
                       <div className="bg-slate-900 rounded-xl overflow-hidden aspect-video relative flex items-center justify-center border-2 border-purple-400">
-                        <img
-                          src={getImageUrl(dup.storage_path)}
+                        <SafeImage
+                          src={getReliableImageUrl(dup)}
+                          fallbackSrc={getImageUrl(dup.storage_path)}
+                          imageId={dup.id}
                           alt={dup.original_filename}
                           className="w-full h-full object-contain"
                         />

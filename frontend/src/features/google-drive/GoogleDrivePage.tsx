@@ -1,4 +1,5 @@
-import { getImageUrl } from '@/lib/utils';
+import { getImageUrl, getReliableImageUrl } from '@/lib/utils';
+import { SafeImage } from '@/components/ui/SafeImage';
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -23,6 +24,7 @@ import { api } from '@/services/api'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
+import { GoogleSheetsSection } from './GoogleSheetsSection'
 import { Modal } from '@/components/ui/Modal'
 
 export const GoogleDrivePage: React.FC = () => {
@@ -261,6 +263,9 @@ export const GoogleDrivePage: React.FC = () => {
         </Card>
       )}
 
+      {/* Dynamic Google Sheets Integration Section */}
+      <GoogleSheetsSection />
+
       {/* Approved Images Cloud Sync Queue */}
       <Card>
         <CardHeader>
@@ -285,10 +290,13 @@ export const GoogleDrivePage: React.FC = () => {
                 items.map((item) => (
                   <tr key={item.id} className="hover:bg-slate-50/50 transition-colors">
                     <td className="py-3.5 px-6 font-medium text-slate-800 flex items-center gap-3">
-                      <img
-                        src={getImageUrl(item.storage_path)}
+                      <SafeImage
+                        src={getReliableImageUrl(item)}
+                        fallbackSrc={getImageUrl(item.storage_path)}
+                        imageId={item.id}
                         alt={item.original_filename}
                         className="w-9 h-9 object-cover rounded-md border"
+                        showMissingBadge={false}
                       />
                       <span className="truncate max-w-[200px]" title={item.original_filename}>
                         {item.original_filename}

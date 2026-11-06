@@ -26,22 +26,68 @@ export function formatDate(dateString?: string | null) {
   })
 }
 
+export function getBackendOrigin(): string {
+  const envBase = import.meta.env.VITE_API_BASE_URL;
+  if (envBase && /^https?:\/\//i.test(envBase)) {
+    try {
+      return new URL(envBase).origin;
+    } catch {
+      // fallback
+    }
+  }
+  if (import.meta.env.PROD) {
+    return 'https://eventdhara-ai.onrender.com';
+  }
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
 export function getImageUrl(path?: string | null): string {
   if (!path) return '';
 
-  // Preserve external image URLs
+  // Preserve external image URLs (e.g. Google Drive, Cloudinary, S3)
   if (/^https?:\/\//i.test(path)) return path;
 
   const cleanPath = path.replace(/^\/+/, '');
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ||
-    (import.meta.env.PROD
-      ? 'https://eventdhara-ai.onrender.com/api/v1'
-      : '');
+  const backendOrigin = getBackendOrigin();
 
-  if (apiBaseUrl) {
-    const backendOrigin = new URL(apiBaseUrl).origin;
+  if (backendOrigin) {
     return `${backendOrigin}/${cleanPath}`;
   }
 
   return `/${cleanPath}`;
+}
+
+export function getReliableImageUrl(item?: {
+  id?: number
+  drive_url?: string | null
+  drive_file_id?: string | null
+  storage_path?: string | null
+  file_url?: string | null
+} | null): string {
+  if (!item) return '';
+
+  // Priority 1: Google Drive URL if synced to cloud
+  if (item.drive_url) return item.drive_url;
+  if (item.drive_file_id) {
+    return `https://drive.google.com/thumbnail?id=${item.drive_file_id}&sz=w1200`;
+  }
+
+  // Priority 2: Dedicated image serving API endpoint
+  if (item.id) {
+    const backendOrigin = getBackendOrigin();
+    return `${backendOrigin}/api/v1/images/${item.id}/file`;
+  }
+
+  // Priority 3: Static storage path
+  if (item.storage_path) {
+    return getImageUrl(item.storage_path);
+  }
+
+  return '';
+}
+
+export function getPlaceholderImageUrl(imageId?: number): string {
+  if (!imageId) return '';
+  const backendOrigin = getBackendOrigin();
+  return `${backendOrigin}/api/v1/images/${imageId}/placeholder`;
 }

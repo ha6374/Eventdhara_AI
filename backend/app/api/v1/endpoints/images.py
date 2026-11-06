@@ -1,7 +1,11 @@
+import os
 import math
+import mimetypes
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.image import ImageItem
 from app.models.audit import AuditLog
@@ -57,6 +61,7 @@ def list_images(
     results = []
     for img in items:
         resp = ImageResponse.model_validate(img)
+        resp.file_url = f"/api/v1/images/{img.id}/file"
         if img.category:
             resp.category_name = img.category.name
         results.append(resp)
@@ -94,9 +99,124 @@ def get_image(image_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Image not found")
 
     resp = ImageResponse.model_validate(img)
+    resp.file_url = f"/api/v1/images/{img.id}/file"
     if img.category:
         resp.category_name = img.category.name
     return resp
+
+
+def find_physical_image_file(img: ImageItem) -> Optional[str]:
+    """Locates physical image file across all storage locations."""
+    # 1. Direct file_path from DB
+    if img.file_path and os.path.exists(img.file_path) and os.path.isfile(img.file_path):
+        return os.path.abspath(img.file_path)
+
+    # 2. In STORAGE_ROOT / "processed" / img.filename
+    proc_path = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", img.filename))
+    if os.path.exists(proc_path) and os.path.isfile(proc_path):
+        return proc_path
+
+    # 3. In STORAGE_ROOT / relative storage_path
+    if img.storage_path:
+        clean_rel = img.storage_path.replace("storage/", "").replace("storage\\", "").lstrip("/\\")
+        rel_candidate = os.path.abspath(os.path.join(settings.STORAGE_ROOT, clean_rel))
+        if os.path.exists(rel_candidate) and os.path.isfile(rel_candidate):
+            return rel_candidate
+
+    # 4. In EventDhara category directories
+    eventdhara_root = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "EventDhara"))
+    if os.path.exists(eventdhara_root):
+        uuid_prefix = img.uuid[:8] if img.uuid else ""
+        for root, _, files in os.walk(eventdhara_root):
+            for f in files:
+                if (uuid_prefix and uuid_prefix in f) or f == img.original_filename or f == img.filename:
+                    matched = os.path.join(root, f)
+                    if os.path.isfile(matched):
+                        return os.path.abspath(matched)
+
+    return None
+
+
+def generate_placeholder_svg(title: str, reason: str = "Asset Missing on Disk (Storage Reset)") -> str:
+    escaped_title = (title or "Decoration Image").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    escaped_reason = (reason or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400" fill="none">
+  <rect width="600" height="400" fill="#0F172A"/>
+  <rect x="20" y="20" width="560" height="360" rx="12" fill="#1E293B" stroke="#334155" stroke-dasharray="6 6"/>
+  <circle cx="300" cy="155" r="44" fill="#334155"/>
+  <path d="M282 171L294 153L304 163L316 143L328 171H282Z" fill="#94A3B8"/>
+  <circle cx="316" cy="139" r="5" fill="#F59E0B"/>
+  <text x="300" y="235" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" fill="#F1F5F9" text-anchor="middle">{escaped_title[:45]}</text>
+  <text x="300" y="260" font-family="system-ui, -apple-system, sans-serif" font-size="12" fill="#94A3B8" text-anchor="middle">{escaped_reason}</text>
+  <rect x="200" y="285" width="200" height="26" rx="13" fill="#B45309" fill-opacity="0.2" stroke="#F59E0B" stroke-width="1"/>
+  <text x="300" y="302" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="500" fill="#FBBF24" text-anchor="middle">Render Persistent Disk Required</text>
+</svg>"""
+
+
+@router.get("/{image_id}/file")
+def get_image_file(
+    image_id: int,
+    fallback: bool = Query(False, description="Return placeholder SVG if file missing on disk"),
+    db: Session = Depends(get_db)
+):
+    """
+    Serves the binary image file directly from storage with fallback to Google Drive
+    or elegant SVG placeholder when container filesystem was recycled.
+    """
+    repo = ImageRepository(db)
+    img = repo.get_by_id(image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image record not found")
+
+    file_path = find_physical_image_file(img)
+    if file_path:
+        mime_type, _ = mimetypes.guess_type(file_path)
+        return FileResponse(
+            path=file_path,
+            media_type=mime_type or "image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "X-Image-Source": "local-disk",
+                "X-Image-Id": str(img.id),
+                "Content-Disposition": f'inline; filename="{img.original_filename}"'
+            }
+        )
+
+    # If file physically missing, check if synced to Google Drive
+    if img.drive_url:
+        return RedirectResponse(url=img.drive_url, status_code=307, headers={"X-Image-Source": "google-drive"})
+    if img.drive_file_id:
+        drive_url = f"https://drive.google.com/uc?export=view&id={img.drive_file_id}"
+        return RedirectResponse(url=drive_url, status_code=307, headers={"X-Image-Source": "google-drive"})
+
+    # If fallback requested, return SVG placeholder
+    if fallback:
+        svg_content = generate_placeholder_svg(img.original_filename)
+        return Response(
+            content=svg_content,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "no-cache", "X-Image-Missing": "true"}
+        )
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Image #{image_id} '{img.original_filename}' is not physically present on disk (ephemeral container reset). Please attach a Render Persistent Disk or re-upload.",
+        headers={"X-Image-Missing": "true"}
+    )
+
+
+@router.get("/{image_id}/placeholder")
+def get_image_placeholder(image_id: int, db: Session = Depends(get_db)):
+    """Returns an SVG placeholder image for missing or failed images."""
+    repo = ImageRepository(db)
+    img = repo.get_by_id(image_id)
+    title = img.original_filename if img else f"Image #{image_id}"
+    svg_content = generate_placeholder_svg(title)
+    return Response(
+        content=svg_content,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=3600", "X-Image-Missing": "true"}
+    )
 
 
 @router.delete("/{image_id}")
@@ -184,6 +304,7 @@ def reject_image_with_feedback(
     db.refresh(img)
 
     resp = ImageResponse.model_validate(img)
+    resp.file_url = f"/api/v1/images/{img.id}/file"
     if img.category:
         resp.category_name = img.category.name
     return resp
@@ -257,6 +378,7 @@ def update_image_status(
     db.commit()
 
     resp = ImageResponse.model_validate(img)
+    resp.file_url = f"/api/v1/images/{img.id}/file"
     if img.category:
         resp.category_name = img.category.name
     return resp

@@ -11,7 +11,10 @@ import type {
   DriveFolderItem,
   SheetsExportResponse,
   FeedbackItem,
-  ModelEvaluation
+  ModelEvaluation,
+  DynamicSheetsConfig,
+  SheetsTestConnectionResult,
+  SheetsSyncResult
 } from '@/types'
 
 const apiClient = axios.create({
@@ -220,6 +223,38 @@ export const api = {
       status: status || 'APPROVED',
       title_prefix: titlePrefix || 'EventDhara Catalog',
     })
+    return res.data
+  },
+
+  // Dynamic User Connected Google Sheets
+  async getDynamicSheetsConfig(): Promise<DynamicSheetsConfig> {
+    const res = await apiClient.get<DynamicSheetsConfig>('/sheets/config')
+    return res.data
+  },
+
+  async updateDynamicSheetsConfig(data: { spreadsheet_url: string; worksheet_name?: string }): Promise<DynamicSheetsConfig> {
+    const res = await apiClient.post<DynamicSheetsConfig>('/sheets/config', data)
+    return res.data
+  },
+
+  async getSheetsAuthUrl(redirectUri?: string): Promise<{ success: boolean; auth_url: string }> {
+    const params = redirectUri ? { redirect_uri: redirectUri } : {}
+    const res = await apiClient.get<{ success: boolean; auth_url: string }>('/sheets/oauth/authorize', { params })
+    return res.data
+  },
+
+  async testDynamicSheetsConnection(): Promise<SheetsTestConnectionResult> {
+    const res = await apiClient.post<SheetsTestConnectionResult>('/sheets/test')
+    return res.data
+  },
+
+  async disconnectDynamicSheets(): Promise<{ success: boolean; message: string }> {
+    const res = await apiClient.post<{ success: boolean; message: string }>('/sheets/disconnect')
+    return res.data
+  },
+
+  async syncMetadataToDynamicSheets(payload?: { image_ids?: number[]; category_id?: number }): Promise<SheetsSyncResult> {
+    const res = await apiClient.post<SheetsSyncResult>('/sheets/sync', payload || {})
     return res.data
   },
 

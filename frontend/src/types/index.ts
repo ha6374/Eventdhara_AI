@@ -75,6 +75,7 @@ export interface ImageItem {
   original_filename: string
   file_path: string
   storage_path: string
+  file_url?: string | null
   file_size: number
   width: number
   height: number
@@ -215,4 +216,40 @@ export interface ModelEvaluation {
   accuracy: number
   model_version: string
   active_learning_status: string
+}
+
+export interface DynamicSheetsConfig {
+  is_connected: boolean
+  connected_email?: string | null
+  connected_account_name?: string | null
+  spreadsheet_url?: string | null
+  spreadsheet_id?: string | null
+  worksheet_name: string
+  last_synced_at?: string | null
+  last_sync_status?: string | null
+  last_sync_message?: string | null
+}
+
+export interface SheetsTestConnectionResult {
+  success: boolean
+  status: string
+  spreadsheet_title?: string
+  spreadsheet_id?: string
+  worksheet_name?: string
+  worksheet_exists?: boolean
+  available_worksheets?: string[]
+  connected_email?: string
+  has_editor_permission?: boolean
+  message: string
+}
+
+export interface SheetsSyncResult {
+  success: boolean
+  appended_count?: number
+  skipped_duplicates?: number
+  spreadsheet_id?: string
+  spreadsheet_url?: string
+  worksheet_name?: string
+  last_synced_at?: string
+  message: string
 }
