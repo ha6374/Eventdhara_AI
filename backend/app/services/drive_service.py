@@ -25,24 +25,29 @@ class GoogleDriveService:
         self.root_folder_name = getattr(settings, "GOOGLE_DRIVE_ROOT_FOLDER_NAME", "Eventdhara_decorations")
 
     def _get_drive_client(self):
-        """Initializes authorized Google Drive v3 client using OAuth token."""
-        if not os.path.exists(self.token_file):
-            return None
+        """Builds Drive API client using encrypted OAuth credentials stored in PostgreSQL."""
         try:
-            from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
-            from google.auth.transport.requests import Request
+            from app.services.dynamic_sheets_service import DynamicGoogleSheetsService
 
-            scopes = ["https://www.googleapis.com/auth/drive"]
-            creds = Credentials.from_authorized_user_file(self.token_file, scopes)
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                with open(self.token_file, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
+            creds = DynamicGoogleSheetsService(self.db).get_credentials(
+                user_id="default"
+            )
 
-            if creds and creds.valid:
-                return build("drive", "v3", credentials=creds)
-            return None
+            if not creds or not creds.valid:
+                return None
+
+            required_scope = "https://www.googleapis.com/auth/drive"
+            granted_scopes = set(creds.scopes or [])
+
+            if required_scope not in granted_scopes:
+                logger.warning(
+                    "Google OAuth token lacks full Drive permission. Reconnect Google account."
+                )
+                return None
+
+            return build("drive", "v3", credentials=creds)
+
         except Exception as e:
             logger.error("Error creating Google Drive API client: %s", e)
             return None
@@ -56,7 +61,7 @@ class GoogleDriveService:
             return {
                 "connected": False,
                 "status": "DISCONNECTED",
-                "message": "Google Drive is not authenticated or token.json is missing.",
+                "message": "Google Drive OAuth is not connected or the stored token lacks Drive permission.",
                 "root_folder_id": self.root_folder_id,
                 "root_folder_name": self.root_folder_name
             }
@@ -183,6 +188,24 @@ class GoogleDriveService:
         if not image:
             return {"success": False, "message": "Image not found"}
 
+        image_status = str(
+            getattr(image.status, "value", image.status)
+        ).upper()
+
+        if image_status != "APPROVED":
+            return {
+                "success": False,
+                "message": "Only approved images can be uploaded to Google Drive."
+            }
+
+        if image.drive_status == "COMPLETED" and image.drive_file_id:
+            return {
+                "success": True,
+                "drive_file_id": image.drive_file_id,
+                "drive_url": image.drive_url,
+                "message": "Image is already uploaded to Google Drive."
+            }
+
         image.drive_status = "UPLOADING"
         self.db.commit()
 
@@ -211,19 +234,11 @@ class GoogleDriveService:
 
         drive = self._get_drive_client()
         if not drive:
-            # Fallback to local verified mirror
-            synthetic_id = f"gdrive_{image.uuid[:12]}"
-            image.drive_status = "COMPLETED"
-            image.drive_file_id = synthetic_id
-            image.drive_url = f"https://drive.google.com/file/d/{synthetic_id}/view"
-            image.drive_uploaded_at = datetime.datetime.utcnow()
+            image.drive_status = "FAILED"
             self.db.commit()
             return {
-                "success": True,
-                "drive_file_id": synthetic_id,
-                "drive_url": image.drive_url,
-                "folder_path": f"{self.root_folder_name} / {cat_folder} / {status_folder}",
-                "message": "Synced to local cloud-mirror (Google Drive client offline)"
+                "success": False,
+                "message": "Google Drive is not connected. No file was uploaded."
             }
 
         try:
@@ -245,6 +260,10 @@ class GoogleDriveService:
             ).execute()
 
             drive_id = drive_file.get("id")
+
+            if not drive_id:
+                raise RuntimeError("Google Drive did not return a valid file ID.")
+
             drive_url = drive_file.get("webViewLink") or f"https://drive.google.com/file/d/{drive_id}/view"
 
             image.drive_status = "COMPLETED"

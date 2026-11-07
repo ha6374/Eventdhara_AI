@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import secrets
 import logging
 import datetime
 from typing import Optional, Dict, Any, List, Tuple
@@ -33,8 +34,9 @@ REQUIRED_HEADERS = [
 ]
 
 GOOGLE_OAUTH_SCOPES = [
+    "openid",
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile"
 ]
@@ -98,16 +100,26 @@ class DynamicGoogleSheetsService:
 
         return None, None
 
-    def generate_auth_url(self, user_id: str = "default", redirect_uri: Optional[str] = None) -> Dict[str, Any]:
-        """Generates Google OAuth 2.0 authorization URL for user to grant Sheets access."""
+    def generate_auth_url(
+        self,
+        user_id: str = "default",
+        redirect_uri: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Generate Google OAuth authorization URL with preserved PKCE verifier."""
+
         client_id, client_secret = self._get_oauth_client_info()
+
         if not client_id or not client_secret:
             return {
                 "success": False,
-                "message": "Google OAuth Client ID and Secret are not configured. Please add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET."
+                "message": "Google OAuth Client ID and Secret are not configured."
             }
 
-        effective_redirect = redirect_uri or getattr(settings, "GOOGLE_REDIRECT_URI", "") or "https://eventdhara-ai.onrender.com/api/v1/sheets/oauth/callback"
+        effective_redirect = (
+            redirect_uri
+            or getattr(settings, "GOOGLE_REDIRECT_URI", "")
+            or "https://eventdhara-ai.onrender.com/api/v1/sheets/oauth/callback"
+        )
 
         client_config = {
             "web": {
@@ -121,18 +133,30 @@ class DynamicGoogleSheetsService:
 
         try:
             from google_auth_oauthlib.flow import Flow
+
             flow = Flow.from_client_config(
                 client_config,
                 scopes=GOOGLE_OAUTH_SCOPES,
                 redirect_uri=effective_redirect
             )
 
-            state_payload = json.dumps({"user_id": user_id, "redirect_uri": effective_redirect})
+            code_verifier = secrets.token_urlsafe(64)
+            flow.code_verifier = code_verifier
+
+            state_payload = {
+                "user_id": user_id,
+                "redirect_uri": effective_redirect,
+                "code_verifier": code_verifier,
+                "nonce": secrets.token_urlsafe(24)
+            }
+
+            encrypted_state = encrypt_token(json.dumps(state_payload))
+
             auth_url, _ = flow.authorization_url(
                 access_type="offline",
                 prompt="consent",
                 include_granted_scopes="true",
-                state=state_payload
+                state=encrypted_state
             )
 
             return {
@@ -140,9 +164,13 @@ class DynamicGoogleSheetsService:
                 "auth_url": auth_url,
                 "redirect_uri": effective_redirect
             }
+
         except Exception as e:
             logger.error("Error creating Google OAuth authorization URL: %s", e)
-            return {"success": False, "message": f"OAuth initialization error: {str(e)}"}
+            return {
+                "success": False,
+                "message": f"OAuth initialization error: {str(e)}"
+            }
 
     def handle_oauth_callback(
         self,
@@ -150,58 +178,81 @@ class DynamicGoogleSheetsService:
         state: Optional[str] = None,
         redirect_uri: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Exchanges OAuth authorization code for tokens, verifies identity, and persists configuration."""
+        """Exchange OAuth code and securely persist Google credentials."""
+
         client_id, client_secret = self._get_oauth_client_info()
+
         if not client_id or not client_secret:
-            return {"success": False, "message": "Google OAuth client credentials missing"}
-
-        user_id = "default"
-        effective_redirect = redirect_uri or getattr(settings, "GOOGLE_REDIRECT_URI", "")
-        if state:
-            try:
-                state_data = json.loads(state)
-                user_id = state_data.get("user_id", "default")
-                if "redirect_uri" in state_data:
-                    effective_redirect = state_data["redirect_uri"]
-            except Exception:
-                user_id = "default"
-
-        client_config = {
-            "web": {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [effective_redirect]
+            return {
+                "success": False,
+                "message": "Google OAuth client credentials missing"
             }
-        }
 
         try:
+            if not state:
+                return {
+                    "success": False,
+                    "message": "OAuth state missing. Please reconnect."
+                }
+
+            decrypted_state = decrypt_token(state)
+
+            if not decrypted_state:
+                return {
+                    "success": False,
+                    "message": "Invalid OAuth state. Please reconnect."
+                }
+
+            state_data = json.loads(decrypted_state)
+
+            user_id = state_data.get("user_id", "default")
+            effective_redirect = state_data.get("redirect_uri")
+            code_verifier = state_data.get("code_verifier")
+
+            if not effective_redirect or not code_verifier:
+                return {
+                    "success": False,
+                    "message": "OAuth session incomplete. Please reconnect."
+                }
+
+            client_config = {
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [effective_redirect]
+                }
+            }
+
             from google_auth_oauthlib.flow import Flow
+
             flow = Flow.from_client_config(
                 client_config,
                 scopes=GOOGLE_OAUTH_SCOPES,
                 redirect_uri=effective_redirect
             )
+
+            flow.code_verifier = code_verifier
             flow.fetch_token(code=code)
             credentials = flow.credentials
 
-            # Fetch authenticated user profile
             email = "Connected User"
             display_name = "Google User"
-            try:
-                user_service = build("oauth2", "v2", credentials=credentials)
-                user_info = user_service.userinfo().get().execute()
-                email = user_info.get("email", email)
-                display_name = user_info.get("name", display_name)
-            except Exception as e:
-                logger.warning("Could not fetch userinfo via oauth2 API: %s", e)
 
-            # Persist encrypted tokens in DB
+            user_service = build("oauth2", "v2", credentials=credentials)
+            user_info = user_service.userinfo().get().execute()
+
+            email = user_info.get("email", email)
+            display_name = user_info.get("name", display_name)
+
             config = self.get_or_create_config(user_id=user_id)
+
             config.access_token = encrypt_token(credentials.token)
+
             if credentials.refresh_token:
                 config.refresh_token = encrypt_token(credentials.refresh_token)
+
             config.token_expiry = credentials.expiry
             config.client_id = client_id
             config.client_secret = client_secret
@@ -215,11 +266,14 @@ class DynamicGoogleSheetsService:
             self.db.commit()
             self.db.refresh(config)
 
-            # Record audit
             audit = AuditLog(
                 action="CONNECT_GOOGLE_SHEETS",
-                details=f"User '{user_id}' authenticated Google account '{email}' for dynamic Google Sheets."
+                details=(
+                    f"User '{user_id}' authenticated Google account "
+                    f"'{email}' for dynamic Google Sheets."
+                )
             )
+
             self.db.add(audit)
             self.db.commit()
 
@@ -230,9 +284,14 @@ class DynamicGoogleSheetsService:
                 "user_id": user_id,
                 "message": f"Successfully connected Google Account: {email}"
             }
+
         except Exception as e:
+            self.db.rollback()
             logger.error("OAuth token exchange failed: %s", e)
-            return {"success": False, "message": f"OAuth token exchange failed: {str(e)}"}
+            return {
+                "success": False,
+                "message": f"OAuth token exchange failed: {str(e)}"
+            }
 
     def get_credentials(self, user_id: str = "default") -> Optional[Credentials]:
         """Loads and decrypts stored tokens, automatically refreshing if expired."""
@@ -256,7 +315,8 @@ class DynamicGoogleSheetsService:
             token_uri=config.token_uri or "https://oauth2.googleapis.com/token",
             client_id=client_id,
             client_secret=client_secret,
-            scopes=json.loads(config.scopes) if config.scopes else GOOGLE_OAUTH_SCOPES
+            scopes=json.loads(config.scopes) if config.scopes else GOOGLE_OAUTH_SCOPES,
+            expiry=config.token_expiry
         )
 
         # Refresh if expired

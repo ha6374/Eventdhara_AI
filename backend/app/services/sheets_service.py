@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import logging
 from typing import Optional, Dict, Any, List
@@ -19,26 +19,30 @@ class GoogleSheetsService:
         self.db = db
 
     def _get_drive_client(self):
-        token_path = getattr(settings, "GOOGLE_DRIVE_TOKEN_JSON", None) or os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "token.json")
-        )
-        if not os.path.exists(token_path):
-            return None
+        """Build Drive API client using encrypted OAuth credentials from PostgreSQL."""
         try:
-            from google.oauth2.credentials import Credentials
             from googleapiclient.discovery import build
-            from google.auth.transport.requests import Request
+            from app.services.dynamic_sheets_service import DynamicGoogleSheetsService
 
-            scopes = ["https://www.googleapis.com/auth/drive"]
-            creds = Credentials.from_authorized_user_file(token_path, scopes)
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                with open(token_path, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
+            creds = DynamicGoogleSheetsService(self.db).get_credentials(
+                user_id="default"
+            )
+
+            if not creds or not creds.valid:
+                logger.error("Google Drive credentials are unavailable or invalid.")
+                return None
+
+            required_scope = "https://www.googleapis.com/auth/drive"
+            granted_scopes = set(creds.scopes or [])
+
+            if required_scope not in granted_scopes:
+                logger.error("Google OAuth token does not have full Drive permission.")
+                return None
 
             return build("drive", "v3", credentials=creds)
-        except Exception as e:
-            logger.error("Failed to initialize Google Drive client for Sheets: %s", e)
+
+        except Exception:
+            logger.exception("Failed to initialize Google Drive client for Sheets.")
             return None
 
     def export_metadata_to_sheets(
@@ -116,7 +120,16 @@ class GoogleSheetsService:
                 except Exception:
                     tags_str = str(meta.tags)
 
-            photo_url = img.drive_url or f"https://drive.google.com/file/d/{img.drive_file_id}/view" if img.drive_file_id else f"http://127.0.0.1:8000/{img.storage_path}"
+            # Export only verified permanent Google Drive URLs.
+            photo_url = None
+            drive_id = str(img.drive_file_id or "").strip()
+
+            if (
+                getattr(img, "drive_status", None) == "COMPLETED"
+                and drive_id
+                and not drive_id.startswith(("gdrive_file_", "gdrive_"))
+            ):
+                photo_url = f"https://drive.google.com/file/d/{drive_id}/view"
 
             rows.append({
                 "Image ID": img.id,
@@ -159,9 +172,9 @@ class GoogleSheetsService:
             with open(export_path, "wb") as f:
                 f.write(excel_bytes)
             return {
-                "success": True,
+                "success": False,
                 "status": "LOCAL_SAVED",
-                "message": "Google Drive token unavailable. Exported to local Excel spreadsheet.",
+                "message": "Google Drive is unavailable. Excel backup saved locally; Google Sheets export was not completed.",
                 "local_file": export_path,
                 "total_rows": len(rows)
             }

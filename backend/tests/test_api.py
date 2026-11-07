@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+﻿from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
@@ -23,12 +23,12 @@ def test_dashboard_overview():
 
 
 def test_category_endpoints():
-    response = client.get("/api/v1/categories/tree")
-    assert response.status_code == 200
-    tree = response.json()
-    assert isinstance(tree, list)
-    assert len(tree) >= 4
-
+    with TestClient(app) as test_client:
+        response = test_client.get("/api/v1/categories/tree")
+        assert response.status_code == 200
+        tree = response.json()
+        assert isinstance(tree, list)
+        assert len(tree) >= 4
 
 def test_image_placeholder_and_file_fallback():
     # 1. Non-existent image returns 404

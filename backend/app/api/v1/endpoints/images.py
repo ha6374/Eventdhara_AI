@@ -377,6 +377,21 @@ def update_image_status(
     db.add(audit)
     db.commit()
 
+    # Automatic Google Drive upload after approval
+    if new_status == "APPROVED":
+        approved_image_id = img.id
+        try:
+            drive_service = GoogleDriveService(db)
+            drive_service.upload_approved_image(approved_image_id)
+        except Exception as drive_error:
+            print(f"Google Drive upload failed: {drive_error}")
+
+        img = db.query(ImageItem).populate_existing().filter(
+            ImageItem.id == approved_image_id
+        ).first()
+
+        if img is None:
+            raise HTTPException(status_code=404, detail="Image not found")
     resp = ImageResponse.model_validate(img)
     resp.file_url = f"/api/v1/images/{img.id}/file"
     if img.category:
@@ -410,15 +425,47 @@ def bulk_image_action(payload: ImageBulkAction, db: Session = Depends(get_db)):
                     failed_count += 1
             elif action == "APPROVE":
                 # Recheck duplicate status
-                is_dup, orig, sim, _ = dup_service.check_global_duplicate(img.sha256, img.phash, exclude_id=img.id)
+                is_dup, orig, sim, _ = dup_service.check_global_duplicate(
+                    img.sha256, img.phash, exclude_id=img.id
+                )
                 if is_dup:
                     failed_count += 1
                     messages.append(f"Image #{img.id} is duplicate of #{orig.id}")
                     continue
+
                 old_status = img.status
                 img.status = "APPROVED"
                 organize_image_in_category_folder(img, old_status=old_status)
+
+                # Commit approval independently of Drive upload.
+                db.commit()
                 success_count += 1
+
+                # Automatically upload approved image to Google Drive.
+                try:
+                    upload_result = drive_service.upload_approved_image(img.id)
+
+                    if not upload_result.get("success"):
+                        messages.append(
+                            f"Image #{img.id} approved, but Drive upload failed: "
+                            f"{upload_result.get('message', 'Unknown error')}"
+                        )
+
+                except Exception as drive_error:
+                    db.rollback()
+
+                    approved_img = db.query(ImageItem).filter(
+                        ImageItem.id == img.id
+                    ).first()
+
+                    if approved_img:
+                        approved_img.drive_status = "FAILED"
+                        db.commit()
+
+                    messages.append(
+                        f"Image #{img.id} approved, but Drive upload failed: "
+                        f"{str(drive_error)}"
+                    )
             elif action == "REJECT":
                 old_status = img.status
                 img.status = "REJECTED"
