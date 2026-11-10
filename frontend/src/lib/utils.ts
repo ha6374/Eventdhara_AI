@@ -35,10 +35,18 @@ export function getBackendOrigin(): string {
       // fallback
     }
   }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    if (import.meta.env.PROD) {
+      if (!window.location.origin.includes('localhost')) {
+        return window.location.origin;
+      }
+      return 'https://eventdhara-ai.onrender.com';
+    }
+  }
   if (import.meta.env.PROD) {
     return 'https://eventdhara-ai.onrender.com';
   }
-  return typeof window !== 'undefined' ? window.location.origin : '';
+  return 'http://localhost:8000';
 }
 
 export function getImageUrl(path?: string | null): string {
@@ -63,19 +71,24 @@ export function getReliableImageUrl(item?: {
   drive_file_id?: string | null
   storage_path?: string | null
   file_url?: string | null
+  status?: string | null
 } | null): string {
   if (!item) return '';
 
-  // Priority 1: Google Drive URL if synced to cloud
-  if (item.drive_url) return item.drive_url;
-  if (item.drive_file_id) {
-    return `https://drive.google.com/thumbnail?id=${item.drive_file_id}&sz=w1200`;
+  const backendOrigin = getBackendOrigin();
+
+  // Priority 1: Dedicated authenticated streaming API endpoint by ID
+  // Serves binary image directly for ALL statuses (APPROVED, REVIEW_REQUIRED, REJECTED, DUPLICATE, PENDING)
+  // Backed by disk storage, PostgreSQL binary backup data, or authenticated Google Drive API
+  if (item.id) {
+    return `${backendOrigin}/api/v1/images/${item.id}/file`;
   }
 
-  // Priority 2: Dedicated image serving API endpoint
-  if (item.id) {
-    const backendOrigin = getBackendOrigin();
-    return `${backendOrigin}/api/v1/images/${item.id}/file`;
+  // Priority 2: Direct file_url from backend schema
+  if (item.file_url) {
+    if (/^https?:\/\//i.test(item.file_url)) return item.file_url;
+    const cleanUrl = item.file_url.replace(/^\/+/, '');
+    return `${backendOrigin}/${cleanUrl}`;
   }
 
   // Priority 3: Static storage path

@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Text, Boolean, DateTime, ForeignKey, LargeBinary
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -50,6 +50,10 @@ class ImageItem(Base):
     drive_file_id = Column(String(255), nullable=True)
     drive_url = Column(Text, nullable=True)
     drive_uploaded_at = Column(DateTime, nullable=True)
+    drive_retry_count = Column(Integer, default=0, nullable=False)
+    drive_next_retry_at = Column(DateTime, nullable=True, index=True)
+    drive_last_error = Column(Text, nullable=True)
+    drive_backup_data = Column(LargeBinary, nullable=True)
 
     # Batch and processing stats
     batch_id = Column(String(36), ForeignKey("upload_batches.id", ondelete="SET NULL"), nullable=True, index=True)

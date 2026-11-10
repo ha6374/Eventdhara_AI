@@ -4,6 +4,7 @@ import uuid
 import shutil
 import logging
 import json
+import datetime
 from typing import Dict, Any, Optional, Tuple
 from PIL import Image
 import cv2
@@ -243,6 +244,14 @@ class ProcessingService:
         dest_path = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", new_filename))
         shutil.copy2(source_file_path, dest_path)
 
+        # Snapshot file bytes for PostgreSQL backup to guarantee durability across container restarts
+        backup_bytes = None
+        try:
+            with open(dest_path, "rb") as bf:
+                backup_bytes = bf.read()
+        except Exception as err:
+            logger.warning("Could not read backup bytes for %s: %s", dest_path, err)
+
         # STEP 1: VALIDATION
         is_valid, val_err, meta = self.validate_file(dest_path)
         if not is_valid:
@@ -265,13 +274,22 @@ class ProcessingService:
                 rejection_reason=f"Validation failed: {val_err}",
                 category_id=target_category_id,
                 batch_id=batch_id,
-                processing_duration_ms=duration_ms
+                processing_duration_ms=duration_ms,
+                drive_status="PENDING",
+                drive_backup_data=backup_bytes,
+                drive_retry_count=0,
+                drive_next_retry_at=datetime.datetime.utcnow()
             )
             self.db.add(item)
             self.db.commit()
             self.db.refresh(item)
             # Organize into Rejected folder
             organize_image_in_category_folder(item)
+            try:
+                from app.services.drive_worker import trigger_drive_sync
+                trigger_drive_sync()
+            except Exception:
+                pass
             return item
 
         # Compute cryptographic and perceptual hashes
@@ -392,6 +410,9 @@ class ProcessingService:
             category_id=assigned_category_id,
             metadata_status="PENDING",
             drive_status="PENDING",
+            drive_backup_data=backup_bytes,
+            drive_retry_count=0,
+            drive_next_retry_at=datetime.datetime.utcnow(),
             batch_id=batch_id,
             processing_duration_ms=duration_ms
         )
@@ -405,6 +426,13 @@ class ProcessingService:
             organize_image_in_category_folder(image_item)
         except Exception as e:
             logger.warning("Error organizing image in category folder: %s", e)
+
+        # Trigger background Drive synchronization worker
+        try:
+            from app.services.drive_worker import trigger_drive_sync
+            trigger_drive_sync()
+        except Exception:
+            pass
 
         # Audit log
         audit = AuditLog(

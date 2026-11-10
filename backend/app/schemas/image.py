@@ -47,6 +47,9 @@ class ImageResponse(BaseModel):
     drive_file_id: Optional[str] = None
     drive_url: Optional[str] = None
     drive_uploaded_at: Optional[datetime.datetime] = None
+    drive_retry_count: Optional[int] = 0
+    drive_next_retry_at: Optional[datetime.datetime] = None
+    drive_last_error: Optional[str] = None
     batch_id: Optional[str] = None
     processing_duration_ms: Optional[float] = None
     created_at: datetime.datetime

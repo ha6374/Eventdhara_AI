@@ -2,7 +2,7 @@ import os
 import shutil
 import datetime
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from app.models.image import ImageItem
 from app.models.category import Category
@@ -175,101 +175,176 @@ class GoogleDriveService:
 
     def upload_approved_image(self, image_id: int) -> Dict[str, Any]:
         """
-        Uploads an approved image to Google Drive category hierarchy:
+        Uploads or relocates an approved image to Google Drive category hierarchy:
         Eventdhara_decorations / {Category} / Approved / {Original_Filename}
         """
         return self.upload_image_to_drive(image_id, force_status="APPROVED")
 
     def upload_image_to_drive(self, image_id: int, force_status: Optional[str] = None) -> Dict[str, Any]:
         """
-        Uploads any image (Approved, Rejected, or Review) to Google Drive in its proper category folder.
+        Uploads any image (Approved, Rejected, Review, Duplicate, or Pending) to Google Drive in its proper category folder.
+        Preserves category and status hierarchy, prevents duplicates via appProperties,
+        reconstructs missing files from PostgreSQL backup, and frees backup data only upon verified upload.
         """
         image = self.db.query(ImageItem).filter(ImageItem.id == image_id).first()
         if not image:
             return {"success": False, "message": "Image not found"}
 
-        image_status = str(
-            getattr(image.status, "value", image.status)
-        ).upper()
-
-        if image_status != "APPROVED":
-            return {
-                "success": False,
-                "message": "Only approved images can be uploaded to Google Drive."
-            }
-
-        if image.drive_status == "COMPLETED" and image.drive_file_id:
-            return {
-                "success": True,
-                "drive_file_id": image.drive_file_id,
-                "drive_url": image.drive_url,
-                "message": "Image is already uploaded to Google Drive."
-            }
-
-        image.drive_status = "UPLOADING"
-        self.db.commit()
-
-        # Resolve category folder name and status
         from app.services.category_storage import get_canonical_category_name, get_status_folder_name
         cat_folder = get_canonical_category_name(image.category)
-        status_name = force_status or image.status
+        status_name = force_status or str(getattr(image.status, "value", image.status)).upper()
         status_folder = get_status_folder_name(status_name)
-
-        # Source file on disk
-        source_file = image.file_path
-        if not os.path.exists(source_file):
-            alt = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
-            if os.path.exists(alt):
-                source_file = alt
-            else:
-                image.drive_status = "FAILED"
-                self.db.commit()
-                return {"success": False, "message": f"Source image file not found on disk: {source_file}"}
-
-        # Local mirror sync
-        mirror_dir = os.path.join(settings.STORAGE_ROOT, "approved", self.root_folder_name, cat_folder, status_folder)
-        os.makedirs(mirror_dir, exist_ok=True)
-        mirror_path = os.path.join(mirror_dir, image.original_filename)
-        shutil.copy2(source_file, mirror_path)
 
         drive = self._get_drive_client()
         if not drive:
             image.drive_status = "FAILED"
+            image.drive_last_error = "Google Drive is not connected. Token missing or invalid."
             self.db.commit()
             return {
                 "success": False,
-                "message": "Google Drive is not connected. No file was uploaded."
+                "message": image.drive_last_error
             }
+
+        # Resolve target parent folder in Drive
+        target_folder_id = self.get_or_create_path_folders([cat_folder, status_folder])
+
+        # If already uploaded to Google Drive with an existing file ID
+        if image.drive_status == "COMPLETED" and image.drive_file_id:
+            try:
+                # Check if image needs folder relocation (e.g. status transition to APPROVED)
+                file_info = drive.files().get(
+                    fileId=image.drive_file_id,
+                    fields="id, parents, webViewLink, trashed"
+                ).execute()
+
+                if not file_info.get("trashed"):
+                    parents = file_info.get("parents", [])
+                    if target_folder_id not in parents:
+                        prev_parents = ",".join(parents)
+                        drive.files().update(
+                            fileId=image.drive_file_id,
+                            addParents=target_folder_id,
+                            removeParents=prev_parents,
+                            body={
+                                "appProperties": {
+                                    "image_id": str(image.id),
+                                    "uuid": str(image.uuid or ""),
+                                    "status": str(status_name)
+                                }
+                            },
+                            fields="id, parents, webViewLink"
+                        ).execute()
+                        logger.info("Relocated Drive file %s to folder %s (%s)", image.drive_file_id, target_folder_id, status_folder)
+
+                    # Ensure backup data is cleared
+                    if image.drive_backup_data is not None:
+                        image.drive_backup_data = None
+                        self.db.commit()
+
+                    return {
+                        "success": True,
+                        "drive_file_id": image.drive_file_id,
+                        "drive_url": image.drive_url or file_info.get("webViewLink"),
+                        "message": "Image is already active on Google Drive."
+                    }
+            except Exception as check_err:
+                logger.warning("Could not verify existing Drive file %s: %s. Proceeding with sync.", image.drive_file_id, check_err)
+
+        image.drive_status = "UPLOADING"
+        self.db.commit()
+
+        # Source file on disk - with automated database reconstruction fallback
+        source_file = image.file_path
+        if not (source_file and os.path.exists(source_file)):
+            alt = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
+            if os.path.exists(alt):
+                source_file = alt
+                image.file_path = alt
+            elif image.drive_backup_data:
+                # Reconstruct file locally from PostgreSQL backup data
+                try:
+                    target_reconstruct = source_file or alt
+                    os.makedirs(os.path.dirname(target_reconstruct), exist_ok=True)
+                    with open(target_reconstruct, "wb") as bf:
+                        bf.write(image.drive_backup_data)
+                    source_file = target_reconstruct
+                    image.file_path = target_reconstruct
+                    logger.info("Successfully reconstructed missing local file from database backup for image #%s at %s", image.id, source_file)
+                except Exception as recon_err:
+                    err_msg = f"Failed reconstructing missing file from database backup: {recon_err}"
+                    logger.error(err_msg)
+                    image.drive_status = "FAILED"
+                    image.drive_last_error = err_msg
+                    self.db.commit()
+                    return {"success": False, "message": err_msg}
+            else:
+                image.drive_status = "FAILED"
+                image.drive_last_error = f"Source image file not found on disk: {source_file} and no database backup exists."
+                self.db.commit()
+                return {"success": False, "message": image.drive_last_error}
+
+        # Local mirror sync
+        try:
+            mirror_dir = os.path.join(settings.STORAGE_ROOT, "approved", self.root_folder_name, cat_folder, status_folder)
+            os.makedirs(mirror_dir, exist_ok=True)
+            mirror_path = os.path.join(mirror_dir, image.original_filename)
+            shutil.copy2(source_file, mirror_path)
+        except Exception as mirror_err:
+            logger.debug("Local mirror copy skipped/failed: %s", mirror_err)
 
         try:
             from googleapiclient.http import MediaFileUpload
 
-            # Get target parent folder in Drive
-            target_folder_id = self.get_or_create_path_folders([cat_folder, status_folder])
+            # Prevent duplicate Drive uploads using Drive appProperties and filename inspection
+            q_app_prop = f"trashed=false and '{target_folder_id}' in parents and appProperties has {{ key='image_id' and value='{image.id}' }}"
+            existing_res = drive.files().list(q=q_app_prop, fields="files(id, name, webViewLink)").execute()
+            matched_files = existing_res.get("files", [])
 
-            mime = "image/jpeg" if image.format.upper() in ["JPEG", "JPG"] else f"image/{image.format.lower()}"
-            media = MediaFileUpload(source_file, mimetype=mime, resumable=True)
+            if not matched_files:
+                clean_name = image.original_filename.replace("'", "\\'")
+                q_name = f"trashed=false and '{target_folder_id}' in parents and name='{clean_name}'"
+                name_res = drive.files().list(q=q_name, fields="files(id, name, webViewLink, appProperties)").execute()
+                matched_files = name_res.get("files", [])
 
-            drive_file = drive.files().create(
-                body={
+            if matched_files:
+                drive_id = matched_files[0]["id"]
+                drive_url = matched_files[0].get("webViewLink") or f"https://drive.google.com/file/d/{drive_id}/view"
+                logger.info("Prevented duplicate Drive upload: image #%s matched existing file %s in Drive.", image.id, drive_id)
+            else:
+                mime = "image/jpeg" if (image.format or "").upper() in ["JPEG", "JPG"] else f"image/{(image.format or 'jpeg').lower()}"
+                media = MediaFileUpload(source_file, mimetype=mime, resumable=True)
+
+                file_metadata = {
                     "name": image.original_filename,
-                    "parents": [target_folder_id]
-                },
-                media_body=media,
-                fields="id, name, webViewLink"
-            ).execute()
+                    "parents": [target_folder_id],
+                    "appProperties": {
+                        "image_id": str(image.id),
+                        "uuid": str(image.uuid or ""),
+                        "sha256": str(image.sha256 or ""),
+                        "status": str(status_name)
+                    }
+                }
 
-            drive_id = drive_file.get("id")
+                drive_file = drive.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, appProperties"
+                ).execute()
 
-            if not drive_id:
-                raise RuntimeError("Google Drive did not return a valid file ID.")
+                drive_id = drive_file.get("id")
+                if not drive_id:
+                    raise RuntimeError("Google Drive did not return a valid file ID.")
 
-            drive_url = drive_file.get("webViewLink") or f"https://drive.google.com/file/d/{drive_id}/view"
+                drive_url = drive_file.get("webViewLink") or f"https://drive.google.com/file/d/{drive_id}/view"
 
+            # Update database record on success
             image.drive_status = "COMPLETED"
             image.drive_file_id = drive_id
             image.drive_url = drive_url
             image.drive_uploaded_at = datetime.datetime.utcnow()
+            image.drive_last_error = None
+            # Clear PostgreSQL backup bytes ONLY after successful Drive upload
+            image.drive_backup_data = None
             self.db.commit()
 
             audit = AuditLog(
@@ -289,10 +364,43 @@ class GoogleDriveService:
             }
 
         except Exception as e:
-            logger.error("Drive upload exception for image %s: %s", image_id, e)
+            err_msg = str(e)
+            logger.error("Drive upload exception for image %s: %s", image_id, err_msg)
             image.drive_status = "FAILED"
+            image.drive_last_error = err_msg[:1000]
+            # DO NOT clear backup data on failure
             self.db.commit()
-            return {"success": False, "message": f"Google Drive API error: {str(e)}"}
+            return {"success": False, "message": f"Google Drive API error: {err_msg}"}
+
+    def download_image_bytes(self, drive_file_id: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """
+        Fetches raw image bytes and mime type for private Google Drive file using authenticated Drive client.
+        Preserves Drive file privacy without redirecting to webViewLink or making files public.
+        """
+        drive = self._get_drive_client()
+        if not drive:
+            logger.error("Authenticated Drive client unavailable for downloading file %s", drive_file_id)
+            return None, None
+
+        try:
+            import io
+            from googleapiclient.http import MediaIoBaseDownload
+
+            file_meta = drive.files().get(fileId=drive_file_id, fields="mimeType").execute()
+            mime_type = file_meta.get("mimeType", "image/jpeg")
+
+            request = drive.files().get_media(fileId=drive_file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+
+            return fh.getvalue(), mime_type
+
+        except Exception as e:
+            logger.error("Error downloading file %s from Google Drive: %s", drive_file_id, e)
+            return None, None
 
     def get_drive_folder_hierarchy(self) -> List[Dict[str, Any]]:
         """

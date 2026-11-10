@@ -12,6 +12,7 @@ from app.core.database import Base, engine, SessionLocal
 import app.models
 from app.api.v1.api import api_router
 from app.services.category_service import CategoryService
+from app.services.drive_worker import start_drive_worker, stop_drive_worker
 
 # Setup structured logging
 logging.basicConfig(
@@ -41,7 +42,21 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    # Start database-backed Google Drive sync background worker
+    try:
+        start_drive_worker()
+        logger.info("Database-backed Google Drive sync worker initialized.")
+    except Exception as e:
+        logger.error("Failed to start Google Drive sync worker: %s", e)
+
     yield
+
+    # Stop worker gracefully on shutdown
+    try:
+        stop_drive_worker()
+        logger.info("Google Drive sync worker stopped.")
+    except Exception as e:
+        logger.error("Error stopping Google Drive sync worker: %s", e)
 
     logger.info("Shutting down EventDhara AI Platform backend.")
 

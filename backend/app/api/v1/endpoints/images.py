@@ -1,6 +1,8 @@
 import os
 import math
 import mimetypes
+import shutil
+import zipfile
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -106,36 +108,93 @@ def get_image(image_id: int, db: Session = Depends(get_db)):
 
 
 def find_physical_image_file(img: ImageItem) -> Optional[str]:
-    """Locates physical image file across all storage locations."""
+    """Locates physical image file across all storage locations and backups."""
     # 1. Direct file_path from DB
     if img.file_path and os.path.exists(img.file_path) and os.path.isfile(img.file_path):
         return os.path.abspath(img.file_path)
 
-    # 2. In STORAGE_ROOT / "processed" / img.filename
-    proc_path = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", img.filename))
-    if os.path.exists(proc_path) and os.path.isfile(proc_path):
-        return proc_path
+    filename = img.filename
+    orig_filename = img.original_filename
+    uuid_str = img.uuid or ""
+    uuid_prefix = uuid_str[:8] if uuid_str else ""
 
-    # 3. In STORAGE_ROOT / relative storage_path
-    if img.storage_path:
-        clean_rel = img.storage_path.replace("storage/", "").replace("storage\\", "").lstrip("/\\")
-        rel_candidate = os.path.abspath(os.path.join(settings.STORAGE_ROOT, clean_rel))
-        if os.path.exists(rel_candidate) and os.path.isfile(rel_candidate):
-            return rel_candidate
+    # Candidate storage roots to check
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    candidate_roots = [
+        os.path.abspath(settings.STORAGE_ROOT),
+        os.path.abspath(os.path.join(project_root, "storage")),
+        os.path.abspath(os.path.join(project_root, "..", "storage")),
+        os.path.abspath(os.path.join(os.path.expanduser("~"), "storage")),
+    ]
+    seen = set()
+    candidate_roots = [r for r in candidate_roots if r and not (r in seen or seen.add(r)) and os.path.exists(r)]
 
-    # 4. In EventDhara category directories
-    eventdhara_root = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "EventDhara"))
-    if os.path.exists(eventdhara_root):
-        uuid_prefix = img.uuid[:8] if img.uuid else ""
-        for root, _, files in os.walk(eventdhara_root):
-            for f in files:
-                if (uuid_prefix and uuid_prefix in f) or f == img.original_filename or f == img.filename:
-                    matched = os.path.join(root, f)
-                    if os.path.isfile(matched):
-                        return os.path.abspath(matched)
+    # 2. Check candidate storage directories
+    for root_dir in candidate_roots:
+        # Check root/processed/filename
+        proc_path = os.path.join(root_dir, "processed", filename)
+        if os.path.isfile(proc_path):
+            return os.path.abspath(proc_path)
+
+        # Check root/relative storage_path
+        if img.storage_path:
+            clean_rel = img.storage_path.replace("storage/", "").replace("storage\\\\", "").replace("storage\\", "").lstrip("/\\\\").lstrip("/\\")
+            rel_candidate = os.path.join(root_dir, clean_rel)
+            if os.path.isfile(rel_candidate):
+                return os.path.abspath(rel_candidate)
+
+        # Check direct root/filename
+        direct_path = os.path.join(root_dir, filename)
+        if os.path.isfile(direct_path):
+            return os.path.abspath(direct_path)
+
+        # Search category and pipeline directories
+        for subfolder_name in ["EventDhara", "approved", "rejected", "duplicates", "uploads", "extracted"]:
+            subfolder = os.path.join(root_dir, subfolder_name)
+            if os.path.exists(subfolder):
+                for walk_root, _, files in os.walk(subfolder):
+                    for f in files:
+                        if f == filename or f == orig_filename or (uuid_prefix and uuid_prefix in f):
+                            matched = os.path.join(walk_root, f)
+                            if os.path.isfile(matched):
+                                return os.path.abspath(matched)
+
+    # 3. Check local download / backup folders for original copy
+    backup_locations = [
+        os.path.join(os.path.expanduser("~"), "Downloads", "pastelcolorbabyshower"),
+        os.path.join(os.path.expanduser("~"), "Downloads"),
+    ]
+    for bloc in backup_locations:
+        if os.path.exists(bloc) and orig_filename:
+            target = os.path.join(bloc, orig_filename)
+            if os.path.isfile(target):
+                try:
+                    dest_proc = os.path.join(settings.STORAGE_ROOT, "processed", filename)
+                    os.makedirs(os.path.dirname(dest_proc), exist_ok=True)
+                    shutil.copy2(target, dest_proc)
+                    return os.path.abspath(dest_proc)
+                except Exception:
+                    return os.path.abspath(target)
+
+    # 4. Check known zip archives in Downloads
+    downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+    if os.path.exists(downloads_dir) and orig_filename:
+        for zname in ["pastelcolorbabyshower.zip", "pinterest-pins-2026-11-01 (1).zip"]:
+            zpath = os.path.join(downloads_dir, zname)
+            if os.path.isfile(zpath):
+                try:
+                    with zipfile.ZipFile(zpath, "r") as zf:
+                        if orig_filename in zf.namelist():
+                            data = zf.read(orig_filename)
+                            dest_proc = os.path.join(settings.STORAGE_ROOT, "processed", filename)
+                            os.makedirs(os.path.dirname(dest_proc), exist_ok=True)
+                            with open(dest_proc, "wb") as f_out:
+                                f_out.write(data)
+                            return os.path.abspath(dest_proc)
+                except Exception:
+                    pass
 
     return None
-
 
 def generate_placeholder_svg(title: str, reason: str = "Asset Missing on Disk (Storage Reset)") -> str:
     escaped_title = (title or "Decoration Image").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
@@ -160,20 +219,33 @@ def get_image_file(
     db: Session = Depends(get_db)
 ):
     """
-    Serves the binary image file directly from storage with fallback to Google Drive
-    or elegant SVG placeholder when container filesystem was recycled.
+    Serves the actual binary image bytes with the correct MIME type.
+    1. Checks local storage.
+    2. If locally missing (e.g., container restart), serves from PostgreSQL backup and reconstructs disk file.
+    3. If not in DB backup, fetches image bytes from private Google Drive via authenticated Drive API.
+    4. Never redirects to webViewLink or public URLs; keeps Drive assets private.
     """
     repo = ImageRepository(db)
     img = repo.get_by_id(image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image record not found")
 
+    mime_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif"
+    }
+
+    # 1. Serve local image when physically available on disk
     file_path = find_physical_image_file(img)
-    if file_path:
-        mime_type, _ = mimetypes.guess_type(file_path)
+    if file_path and os.path.isfile(file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        mime_type = mime_map.get(ext) or mimetypes.guess_type(file_path)[0] or "image/jpeg"
         return FileResponse(
             path=file_path,
-            media_type=mime_type or "image/jpeg",
+            media_type=mime_type,
             headers={
                 "Cache-Control": "public, max-age=86400",
                 "X-Image-Source": "local-disk",
@@ -182,14 +254,66 @@ def get_image_file(
             }
         )
 
-    # If file physically missing, check if synced to Google Drive
-    if img.drive_url:
-        return RedirectResponse(url=img.drive_url, status_code=307, headers={"X-Image-Source": "google-drive"})
-    if img.drive_file_id:
-        drive_url = f"https://drive.google.com/uc?export=view&id={img.drive_file_id}"
-        return RedirectResponse(url=drive_url, status_code=307, headers={"X-Image-Source": "google-drive"})
+    # 2. Reconstruct from PostgreSQL backup if local file was wiped
+    if img.drive_backup_data:
+        ext = os.path.splitext(img.filename or img.original_filename)[1].lower()
+        mime_type = mime_map.get(ext) or "image/jpeg"
 
-    # If fallback requested, return SVG placeholder
+        # Reconstruct file locally on disk for fast subsequent accesses
+        try:
+            target_path = img.file_path or os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", img.filename))
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "wb") as bf:
+                bf.write(img.drive_backup_data)
+            img.file_path = target_path
+            db.commit()
+        except Exception as write_err:
+            pass
+
+        return Response(
+            content=img.drive_backup_data,
+            media_type=mime_type,
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "X-Image-Source": "database-backup",
+                "X-Image-Id": str(img.id),
+                "Content-Disposition": f'inline; filename="{img.original_filename}"'
+            }
+        )
+
+    # 3. Fetch from private Google Drive using authenticated API (no webViewLink redirects)
+    if img.drive_file_id:
+        try:
+            drive_svc = GoogleDriveService(db)
+            drive_bytes, drive_mime = drive_svc.download_image_bytes(img.drive_file_id)
+            if drive_bytes:
+                actual_mime = drive_mime or mime_map.get(os.path.splitext(img.original_filename)[1].lower()) or "image/jpeg"
+
+                # Reconstruct/cache file on disk for future fast access
+                try:
+                    target_path = img.file_path or os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", img.filename))
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with open(target_path, "wb") as bf:
+                        bf.write(drive_bytes)
+                    img.file_path = target_path
+                    db.commit()
+                except Exception:
+                    pass
+
+                return Response(
+                    content=drive_bytes,
+                    media_type=actual_mime,
+                    headers={
+                        "Cache-Control": "public, max-age=86400",
+                        "X-Image-Source": "google-drive-authenticated",
+                        "X-Image-Id": str(img.id),
+                        "Content-Disposition": f'inline; filename="{img.original_filename}"'
+                    }
+                )
+        except Exception as drive_fetch_err:
+            pass
+
+    # 4. If fallback requested, return SVG placeholder
     if fallback:
         svg_content = generate_placeholder_svg(img.original_filename)
         return Response(
@@ -200,10 +324,9 @@ def get_image_file(
 
     raise HTTPException(
         status_code=404,
-        detail=f"Image #{image_id} '{img.original_filename}' is not physically present on disk (ephemeral container reset). Please attach a Render Persistent Disk or re-upload.",
+        detail=f"Image #{image_id} '{img.original_filename}' is not physically present on disk or cloud storage.",
         headers={"X-Image-Missing": "true"}
     )
-
 
 @router.get("/{image_id}/placeholder")
 def get_image_placeholder(image_id: int, db: Session = Depends(get_db)):

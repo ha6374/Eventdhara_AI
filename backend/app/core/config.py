@@ -72,13 +72,15 @@ class Settings(BaseSettings):
 
     @field_validator("STORAGE_ROOT", mode="before")
     def resolve_storage_root(cls, v: Optional[str] = None) -> str:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         if v and isinstance(v, str) and v.strip():
             cleaned = v.strip()
             if os.path.isabs(cleaned):
                 return cleaned
-            return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", cleaned))
-        project_storage = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "storage"))
-        return project_storage
+            # Strip relative parent traversal so relative paths stay anchored to project root
+            clean_sub = cleaned.replace("../", "").replace("..\\", "").lstrip("/\\")
+            return os.path.abspath(os.path.join(project_root, clean_sub or "storage"))
+        return os.path.abspath(os.path.join(project_root, "storage"))
 
     @field_validator("CORS_ORIGINS", mode="before")
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:

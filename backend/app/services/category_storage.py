@@ -31,7 +31,7 @@ STATUS_FOLDER_MAPPING = {
     "REJECTED": "Rejected",
     "REVIEW_REQUIRED": "Review_Required",
     "DUPLICATE": "Duplicates",
-    "PENDING": "Review_Required"
+    "PENDING": "Pending"
 }
 
 
