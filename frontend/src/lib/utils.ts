@@ -28,25 +28,22 @@ export function formatDate(dateString?: string | null) {
 
 export function getBackendOrigin(): string {
   const envBase = import.meta.env.VITE_API_BASE_URL;
+
+  // Always use the configured backend origin in production.
   if (envBase && /^https?:\/\//i.test(envBase)) {
     try {
       return new URL(envBase).origin;
     } catch {
-      // fallback
+      console.warn("Invalid VITE_API_BASE_URL:", envBase);
     }
   }
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    if (import.meta.env.PROD) {
-      if (!window.location.origin.includes('localhost')) {
-        return window.location.origin;
-      }
-      return 'https://eventdhara-ai.onrender.com';
-    }
-  }
+
+  // Explicit production backend fallback.
   if (import.meta.env.PROD) {
-    return 'https://eventdhara-ai.onrender.com';
+    return "https://eventdhara-ai.onrender.com";
   }
-  return 'http://localhost:8000';
+
+  return "http://localhost:8000";
 }
 
 export function getImageUrl(path?: string | null): string {
