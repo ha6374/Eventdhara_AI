@@ -109,7 +109,6 @@ class FeedbackLearningService:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        temperature=0.2
                     )
                 )
                 txt = resp.text.strip()

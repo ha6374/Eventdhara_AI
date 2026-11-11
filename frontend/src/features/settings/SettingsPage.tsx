@@ -35,7 +35,7 @@ export const SettingsPage: React.FC = () => {
   const [blurThreshold, setBlurThreshold] = useState(100.0)
   const [phashThreshold, setPhashThreshold] = useState(5)
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.75)
-  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash')
+  const [geminiModel, setGeminiModel] = useState('gemini-3.8-flash')
   const [geminiApiKey, setGeminiApiKey] = useState('')
   const [connectionTestResult, setConnectionTestResult] = useState<{
     success: boolean
@@ -337,7 +337,7 @@ export const SettingsPage: React.FC = () => {
                   onChange={(e) => setGeminiModel(e.target.value)}
                   className="w-full px-3 py-1.5 border rounded-lg text-xs"
                 >
-                  <option value="gemini-2.5-flash">gemini-2.5-flash (Fast & Structured)</option>
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (Fast & Structured)</option>
                   <option value="gemini-2.5-pro">gemini-2.5-pro (High Precision)</option>
                 </select>
               </div>

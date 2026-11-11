@@ -238,7 +238,6 @@ class GeminiService:
                 config=types.GenerateContentConfig(
                     system_instruction=CLASSIFICATION_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
-                    temperature=0.1
                 )
             )
 
@@ -320,7 +319,6 @@ class GeminiService:
                 config=types.GenerateContentConfig(
                     system_instruction=METADATA_SYSTEM_INSTRUCTION,
                     response_mime_type="application/json",
-                    temperature=0.2
                 )
             )
 
