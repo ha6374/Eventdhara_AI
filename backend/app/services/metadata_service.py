@@ -1,4 +1,3 @@
-import os
 import json
 import logging
 from typing import Optional, Dict, Any, List, Tuple
@@ -7,7 +6,6 @@ from sqlalchemy.exc import IntegrityError
 from app.models.image import ImageItem
 from app.models.metadata import ImageMetadata
 from app.models.audit import AuditLog
-from app.core.config import settings
 from app.schemas.metadata import MetadataCreate, MetadataUpdate
 from app.services.gemini_service import (
     gemini_service,
@@ -107,29 +105,24 @@ class MetadataService:
         image.metadata_status = "PROCESSING"
         self.db.commit()
 
-        # Resolve image file path safely
+        # Resolve category information for metadata generation
         cat_name = image.category.name if image.category else "Celebration"
         parent_name = image.category.parent.name if image.category and image.category.parent else ""
 
-        source_file = image.file_path
-        if not os.path.isabs(source_file):
-            source_file = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
-
-        if not os.path.exists(source_file):
-            alt = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "processed", image.filename))
-            if os.path.exists(alt):
-                source_file = alt
-            else:
-                alt2 = os.path.abspath(os.path.join(settings.STORAGE_ROOT, "approved", image.filename))
-                if os.path.exists(alt2):
-                    source_file = alt2
-
-        photo_link = image.drive_url or f"/{image.storage_path}"
+        # Metadata generation uses Google Drive only.
+        photo_link = image.drive_url or ""
 
         # Call Gemini Vision API
         try:
+            if not image.drive_file_id:
+                raise MetadataGenerationError('Google Drive file ID missing.')
+            from app.services.drive_service import GoogleDriveService
+            drive_image_bytes, drive_mime_type = GoogleDriveService(self.db).download_image_bytes(image.drive_file_id)
+            if not drive_image_bytes:
+                raise MetadataGenerationError('Google Drive image download failed.')
             meta_dict = gemini_service.generate_metadata(
-                image_path=source_file,
+                image_bytes=drive_image_bytes,
+                image_mime_type=drive_mime_type,
                 category_name=parent_name or cat_name,
                 subcategory_name=cat_name if parent_name else "",
                 photo_url=photo_link

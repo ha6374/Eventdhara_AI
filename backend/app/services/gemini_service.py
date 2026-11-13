@@ -1,3 +1,4 @@
+import io
 import os
 import json
 import logging
@@ -156,6 +157,25 @@ class ImageValidationError(Exception):
 
 
 class GeminiService:
+
+    def _prepare_gemini_bytes_and_mime(self, image_bytes, source_mime_type=None):
+        from PIL import Image
+        import io
+        if not image_bytes:
+            raise ImageValidationError("Empty image downloaded from Google Drive.")
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                img.verify()
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                mime = Image.MIME.get(img.format)
+                if not mime:
+                    raise ImageValidationError("Unsupported image format.")
+            return image_bytes, mime
+        except ImageValidationError:
+            raise
+        except Exception as exc:
+            raise ImageValidationError(f"Invalid Google Drive image: {exc}") from exc
+
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY", settings.GEMINI_API_KEY)
         self.client = None
@@ -472,7 +492,8 @@ class GeminiService:
 
     def generate_metadata(
         self,
-        image_path: str,
+        image_bytes: Optional[bytes] = None,
+        image_mime_type: Optional[str] = None,
         category_name: str = "",
         subcategory_name: str = "",
         photo_url: str = ""
@@ -495,8 +516,15 @@ class GeminiService:
             logger.error("Google Gen AI client could not be initialized.")
             raise GeminiAuthError("Google Gen AI client could not be initialized.")
 
-        # Validate image file and obtain actual bytes and MIME type
-        image_bytes, mime_type = self._prepare_gemini_image_and_mime(image_path)
+        # DRIVE-ONLY metadata generation. Local image paths are not accepted.
+        if not image_bytes:
+            raise ImageValidationError(
+                "Google Drive image bytes are required for metadata generation."
+            )
+
+        image_bytes, mime_type = self._prepare_gemini_bytes_and_mime(
+            image_bytes, image_mime_type
+        )
 
         prompt = (
             f"Context: Category: '{category_name}', Subcategory: '{subcategory_name}'.\n"
@@ -512,7 +540,7 @@ class GeminiService:
         try:
             from google.genai import types
 
-            logger.info("Calling Gemini API (%s) for metadata on %s [MIME: %s]", model_name, image_path, mime_type)
+            logger.info("Calling Gemini API (%s) for Drive image metadata [MIME: %s]", model_name, mime_type)
             response = self.client.models.generate_content(
                 model=model_name,
                 contents=[
@@ -526,7 +554,7 @@ class GeminiService:
             )
 
             if not response or not response.text:
-                logger.error("Gemini API returned an empty response for %s", image_path)
+                logger.error("Gemini API returned an empty response for Drive image")
                 raise GeminiValidationError("Gemini API returned an empty response.")
 
             result_text = response.text.strip()
@@ -541,18 +569,18 @@ class GeminiService:
             try:
                 raw_json = json.loads(result_text)
             except Exception as json_err:
-                logger.error("Failed parsing Gemini JSON response for %s: %s. Response: %s", image_path, json_err, result_text[:300])
+                logger.error("Failed parsing Gemini JSON response: %s. Response: %s", json_err, result_text[:300])
                 raise GeminiValidationError(f"Malformed JSON from Gemini: {json_err}")
 
             validated = self._validate_metadata_fields(raw_json)
-            validated["photo"] = photo_url or f"/storage/processed/{os.path.basename(image_path)}"
+            validated["photo"] = photo_url or ""
             return validated
 
         except (ImageValidationError, GeminiMetadataError):
             raise
         except Exception as e:
             err_str = str(e)
-            logger.error("Gemini metadata generation failed for %s: %s", image_path, err_str)
+            logger.error("Gemini metadata generation failed for Drive image: %s", err_str)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 raise GeminiQuotaError(f"Gemini API rate limit or quota exceeded (429): {err_str}") from e
             elif "403" in err_str or "PERMISSION_DENIED" in err_str or "billing" in err_str.lower():
