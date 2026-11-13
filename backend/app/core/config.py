@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # AI (Gemini) Settings
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
     AI_CONFIDENCE_THRESHOLD: float = 0.75
 
     # Google Drive Integration
