@@ -84,10 +84,13 @@ REQUIRED FIELDS:
 8. tags: Array of categorization tags.
 
 STRICT CONSTRAINTS:
+- Base everything strictly on visible decoration elements in THIS photo.
 - NEVER invent prices, monetary figures, or discounts.
 - NEVER invent dimensions or arbitrary measurements.
 - NEVER invent service guarantees, catering, or venue rentals.
-- Base everything strictly on visible decoration elements.
+- NEVER invent event details, decorations, materials, or inclusions that cannot be visually confirmed.
+- If visual information is insufficient, state uncertainty rather than inventing facts.
+- Do not reuse generic templates, boilerplate, or placeholder text.
 
 OUTPUT FORMAT:
 Output strictly valid JSON matching this schema:
@@ -110,6 +113,46 @@ Output strictly valid JSON matching this schema:
   "tags": ["Wedding", "Mandap", "Traditional", "Marigold", "Floral"]
 }
 """
+
+
+class GeminiMetadataError(Exception):
+    """Base exception for Gemini metadata generation failures."""
+    pass
+
+
+class GeminiAuthError(GeminiMetadataError):
+    """Raised when Gemini API key is missing, invalid, or project permission/billing is denied (401/403)."""
+    pass
+
+
+class GeminiQuotaError(GeminiMetadataError):
+    """Raised when Gemini API quota or rate limit is exceeded (429 / RESOURCE_EXHAUSTED)."""
+    pass
+
+
+class GeminiModelNotFoundError(GeminiMetadataError):
+    """Raised when Gemini model is not found (404)."""
+    pass
+
+
+class GeminiServiceUnavailableError(GeminiMetadataError):
+    """Raised when Gemini service is unavailable (500 / 503 / UNAVAILABLE)."""
+    pass
+
+
+class GeminiConnectionError(GeminiMetadataError):
+    """Raised when network timeout or connection error occurs."""
+    pass
+
+
+class GeminiValidationError(GeminiMetadataError):
+    """Raised when Gemini returns malformed JSON, incomplete fields, or invalid metadata."""
+    pass
+
+
+class ImageValidationError(Exception):
+    """Raised when image file is missing, corrupt, or unreadable."""
+    pass
 
 
 class GeminiService:
@@ -174,21 +217,61 @@ class GeminiService:
                 "message": msg
             }
 
-    def _prepare_gemini_image_bytes(self, image_path: str) -> bytes:
+    def _prepare_gemini_image_and_mime(self, image_path: str) -> tuple:
         """
-        Prepares compact image bytes for the Gemini Vision API.
-        If the file exceeds 1.5MB or 1600px, it generates an optimized in-memory JPEG
-        to drastically reduce network payload, RAM consumption, and latency.
+        Validates that the image file exists, can be opened and verified by PIL,
+        determines the true MIME type (handling PNG, JPG, JPEG, and WEBP accurately),
+        and returns (image_bytes, mime_type).
+        Raises ImageValidationError if the file is missing, empty, or corrupt.
         """
-        import io
+        if not image_path or not os.path.exists(image_path):
+            raise ImageValidationError(f"Image file does not exist at path: '{image_path}'")
+
+        if not os.path.isfile(image_path):
+            raise ImageValidationError(f"Image path is not a regular file: '{image_path}'")
+
         file_size = os.path.getsize(image_path)
-        if file_size > 1.5 * 1024 * 1024:
-            try:
-                with Image.open(image_path) as pil_img:
+        if file_size == 0:
+            raise ImageValidationError(f"Image file is empty (0 bytes): '{image_path}'")
+
+        # Verify integrity with PIL
+        try:
+            with Image.open(image_path) as pil_test:
+                pil_test.verify()
+        except Exception as e:
+            raise ImageValidationError(f"Corrupt or unreadable image file '{image_path}': {e}")
+
+        # Re-open after verify() to inspect properties and read/convert
+        try:
+            with Image.open(image_path) as pil_img:
+                raw_format = (pil_img.format or "").upper()
+                format_mime_map = {
+                    "JPEG": "image/jpeg",
+                    "JPG": "image/jpeg",
+                    "PNG": "image/png",
+                    "WEBP": "image/webp",
+                }
+                detected_mime = format_mime_map.get(raw_format)
+                if not detected_mime:
+                    ext = os.path.splitext(image_path)[1].lower()
+                    ext_map = {
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".png": "image/png",
+                        ".webp": "image/webp",
+                    }
+                    detected_mime = ext_map.get(ext)
+                    if not detected_mime:
+                        raise ImageValidationError(f"Unsupported image format '{raw_format or ext}' for Gemini Vision.")
+
+                w, h = pil_img.size
+                max_dim = max(w, h)
+
+                # If very large (>1.5MB or >1600px), generate an optimized in-memory JPEG
+                if file_size > 1.5 * 1024 * 1024 or max_dim > 1600:
+                    import io
                     if pil_img.mode not in ("RGB", "L"):
                         pil_img = pil_img.convert("RGB")
-                    w, h = pil_img.size
-                    max_dim = max(w, h)
                     if max_dim > 1600:
                         scale = 1600.0 / float(max_dim)
                         pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
@@ -196,12 +279,25 @@ class GeminiService:
                     pil_img.save(buf, format="JPEG", quality=85, optimize=True)
                     data = buf.getvalue()
                     buf.close()
-                    return data
-            except Exception as e:
-                logger.warning("Failed optimizing image for Gemini (%s), sending direct file bytes", e)
+                    return data, "image/jpeg"
 
-        with open(image_path, "rb") as f:
-            return f.read()
+            # Otherwise, read actual original image bytes directly
+            with open(image_path, "rb") as f:
+                data = f.read()
+            return data, detected_mime
+        except ImageValidationError:
+            raise
+        except Exception as e:
+            raise ImageValidationError(f"Failed to read image file '{image_path}': {e}")
+
+    def _prepare_gemini_image_bytes(self, image_path: str) -> bytes:
+        """
+        Prepares compact image bytes for the Gemini Vision API.
+        If the file exceeds 1.5MB or 1600px, it generates an optimized in-memory JPEG
+        to drastically reduce network payload, RAM consumption, and latency.
+        """
+        data, _ = self._prepare_gemini_image_and_mime(image_path)
+        return data
 
     def classify_image(
         self,
@@ -285,6 +381,95 @@ class GeminiService:
             logger.warning("Gemini classification call failed: %s. Engaging heuristic classifier.", e)
             return self._heuristic_fallback_classification(image_path, clean_uploaded)
 
+    def _validate_metadata_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validates all 8 required EventDhara metadata fields:
+        1. name: Non-empty string, no template placeholders
+        2. short_description: Non-empty string
+        3. long_description: Professional non-empty overview
+        4. inclusion: Non-empty list of strings (accepts 'inclusions' or 'inclusion')
+        5. faq: Non-empty list of questions/answers (accepts 'faq', 'faqs', 'FAQs')
+        6. note: String advisory
+        7. keywords: Non-empty list of strings
+        8. tags: Non-empty list of strings
+        """
+        if not isinstance(data, dict):
+            raise GeminiValidationError("Metadata payload must be a JSON dictionary.")
+
+        # 1. name
+        name = data.get("name")
+        if not name or not isinstance(name, str) or not name.strip():
+            raise GeminiValidationError("Required field 'name' is missing or empty.")
+        name = name.strip()
+        for placeholder in ["handcrafted celebration", "decor setup #", "[placeholder]", "template decor"]:
+            if placeholder in name.lower():
+                raise GeminiValidationError(f"Rejected template/placeholder name: '{name}'")
+
+        # 2. short_description
+        short_desc = data.get("short_description")
+        if not short_desc or not isinstance(short_desc, str) or not short_desc.strip():
+            raise GeminiValidationError("Required field 'short_description' is missing or empty.")
+        short_desc = short_desc.strip()
+
+        # 3. long_description
+        long_desc = data.get("long_description")
+        if not long_desc or not isinstance(long_desc, str) or not long_desc.strip():
+            raise GeminiValidationError("Required field 'long_description' is missing or empty.")
+        long_desc = long_desc.strip()
+
+        # 4. inclusion (accept inclusion or inclusions)
+        raw_inc = data.get("inclusion") if "inclusion" in data else data.get("inclusions")
+        if raw_inc is None or not isinstance(raw_inc, list) or len(raw_inc) == 0:
+            raise GeminiValidationError("Required field 'inclusion' / 'inclusions' must be a non-empty list.")
+        clean_inclusions = [str(item).strip() for item in raw_inc if str(item).strip()]
+        if not clean_inclusions:
+            raise GeminiValidationError("Field 'inclusion' must contain at least one non-empty item.")
+
+        # 5. faq (accept faq, faqs, FAQs)
+        raw_faq = data.get("faq") if "faq" in data else data.get("faqs", data.get("FAQs"))
+        if raw_faq is None or not isinstance(raw_faq, list) or len(raw_faq) == 0:
+            raise GeminiValidationError("Required field 'faq' / 'FAQs' must be a non-empty list.")
+
+        # 6. note
+        note = data.get("note", "")
+        if note is None:
+            note = ""
+        elif not isinstance(note, str):
+            note = str(note)
+        note = note.strip()
+
+        # 7. keywords
+        raw_kw = data.get("keywords")
+        if raw_kw is None or not isinstance(raw_kw, list) or len(raw_kw) == 0:
+            raise GeminiValidationError("Required field 'keywords' must be a non-empty list.")
+        clean_keywords = [str(item).strip() for item in raw_kw if str(item).strip()]
+        if not clean_keywords:
+            raise GeminiValidationError("Field 'keywords' must contain at least one non-empty keyword.")
+
+        # 8. tags
+        raw_tags = data.get("tags")
+        if raw_tags is None or not isinstance(raw_tags, list) or len(raw_tags) == 0:
+            raise GeminiValidationError("Required field 'tags' must be a non-empty list.")
+        clean_tags = [str(item).strip() for item in raw_tags if str(item).strip()]
+        if not clean_tags:
+            raise GeminiValidationError("Field 'tags' must contain at least one non-empty tag.")
+
+        custom_fields = data.get("custom_fields", {})
+        if not isinstance(custom_fields, dict):
+            custom_fields = {}
+
+        return {
+            "name": name,
+            "short_description": short_desc,
+            "long_description": long_desc,
+            "inclusion": clean_inclusions,
+            "faq": raw_faq,
+            "note": note,
+            "keywords": clean_keywords,
+            "tags": clean_tags,
+            "custom_fields": custom_fields
+        }
+
     def generate_metadata(
         self,
         image_path: str,
@@ -293,27 +478,45 @@ class GeminiService:
         photo_url: str = ""
     ) -> Dict[str, Any]:
         """
-        Generates structured 9-field metadata for approved decoration photos.
+        Generates structured catalog metadata for an approved decoration photo using Gemini Vision.
+        DOES NOT fall back to templates or heuristics on failure.
+        Raises GeminiMetadataError or ImageValidationError on any failure.
         """
-        cat_label = subcategory_name or category_name or "Event Decoration"
+        self.api_key = os.getenv("GEMINI_API_KEY", settings.GEMINI_API_KEY)
+        model_name = os.getenv("GEMINI_MODEL", getattr(settings, "GEMINI_MODEL", "gemini-3.1-flash-lite"))
 
-        if not self.client:
-            return self._heuristic_metadata_generator(image_path, category_name, subcategory_name, photo_url)
+        if not self.api_key or not self.api_key.strip():
+            logger.error("Gemini API key is not configured. Metadata generation cannot proceed.")
+            raise GeminiAuthError("Gemini API key is not configured. Please set GEMINI_API_KEY.")
+
+        if self.client is None:
+            self._init_client()
+        if self.client is None:
+            logger.error("Google Gen AI client could not be initialized.")
+            raise GeminiAuthError("Google Gen AI client could not be initialized.")
+
+        # Validate image file and obtain actual bytes and MIME type
+        image_bytes, mime_type = self._prepare_gemini_image_and_mime(image_path)
+
+        prompt = (
+            f"Context: Category: '{category_name}', Subcategory: '{subcategory_name}'.\n"
+            "Analyze the attached decoration photo and generate strictly factual, image-specific product catalog metadata.\n"
+            "RULES:\n"
+            "- Base every single field SOLELY on visible elements in THIS specific photo.\n"
+            "- Do not use generic templates or placeholders.\n"
+            "- Do not invent inclusions, dimensions, materials, or facts not visible in the image.\n"
+            "- If visual information is insufficient, state uncertainty rather than inventing facts.\n"
+            "- Output valid JSON strictly conforming to the required schema."
+        )
 
         try:
             from google.genai import types
 
-            image_bytes = self._prepare_gemini_image_bytes(image_path)
-
-            prompt = (
-                f"Category: {category_name}. Subcategory: {subcategory_name}. "
-                "Generate complete structured product catalog metadata adhering strictly to visible decoration details."
-            )
-
+            logger.info("Calling Gemini API (%s) for metadata on %s [MIME: %s]", model_name, image_path, mime_type)
             response = self.client.models.generate_content(
-                model=settings.GEMINI_MODEL,
+                model=model_name,
                 contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                     prompt
                 ],
                 config=types.GenerateContentConfig(
@@ -322,19 +525,46 @@ class GeminiService:
                 )
             )
 
+            if not response or not response.text:
+                logger.error("Gemini API returned an empty response for %s", image_path)
+                raise GeminiValidationError("Gemini API returned an empty response.")
+
             result_text = response.text.strip()
             if result_text.startswith("```json"):
                 result_text = result_text[7:]
+            elif result_text.startswith("```"):
+                result_text = result_text[3:]
             if result_text.endswith("```"):
                 result_text = result_text[:-3]
+            result_text = result_text.strip()
 
-            parsed = json.loads(result_text.strip())
-            parsed["photo"] = photo_url or f"/storage/processed/{os.path.basename(image_path)}"
-            return parsed
+            try:
+                raw_json = json.loads(result_text)
+            except Exception as json_err:
+                logger.error("Failed parsing Gemini JSON response for %s: %s. Response: %s", image_path, json_err, result_text[:300])
+                raise GeminiValidationError(f"Malformed JSON from Gemini: {json_err}")
 
+            validated = self._validate_metadata_fields(raw_json)
+            validated["photo"] = photo_url or f"/storage/processed/{os.path.basename(image_path)}"
+            return validated
+
+        except (ImageValidationError, GeminiMetadataError):
+            raise
         except Exception as e:
-            logger.warning("Gemini metadata generation failed: %s. Using verified template.", e)
-            return self._heuristic_metadata_generator(image_path, category_name, subcategory_name, photo_url)
+            err_str = str(e)
+            logger.error("Gemini metadata generation failed for %s: %s", image_path, err_str)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                raise GeminiQuotaError(f"Gemini API rate limit or quota exceeded (429): {err_str}") from e
+            elif "403" in err_str or "PERMISSION_DENIED" in err_str or "billing" in err_str.lower():
+                raise GeminiAuthError(f"Gemini API permission denied or billing required (403): {err_str}") from e
+            elif "404" in err_str or "NOT_FOUND" in err_str:
+                raise GeminiModelNotFoundError(f"Gemini model not found (404): {err_str}") from e
+            elif "503" in err_str or "500" in err_str or "UNAVAILABLE" in err_str:
+                raise GeminiServiceUnavailableError(f"Gemini service unavailable (503/500): {err_str}") from e
+            elif "timeout" in err_str.lower() or "connection" in err_str.lower():
+                raise GeminiConnectionError(f"Gemini connection error or timeout: {err_str}") from e
+            else:
+                raise GeminiMetadataError(f"Gemini API call failed: {err_str}") from e
 
     def _heuristic_fallback_classification(self, image_path: str, uploaded_category: str) -> Dict[str, Any]:
         """
@@ -417,39 +647,6 @@ class GeminiService:
             "approval_status": app_status,
             "rejection_reason": rej_reason,
             "review_required": app_status == "REVIEW_REQUIRED"
-        }
-
-    def _heuristic_metadata_generator(
-        self,
-        image_path: str,
-        category: str,
-        subcategory: str,
-        photo_url: str = ""
-    ) -> Dict[str, Any]:
-        cat_label = subcategory or category or "Celebration"
-        clean_url = photo_url or f"/storage/processed/{os.path.basename(image_path)}"
-        return {
-            "name": f"Handcrafted {cat_label} Styling & Backdrop Setup",
-            "photo": clean_url,
-            "short_description": f"Curated handcrafted {cat_label.lower()} arrangement featuring thematic floral elements, focal arches, and ambient aesthetics.",
-            "long_description": (
-                f"An enterprise-quality {cat_label.lower()} stage design crafted for memorable event ambiance. "
-                "The setup incorporates balanced geometric arch frames, high-grade faux and fresh flora, "
-                "coordinated color themes, and subtle floor embellishments tailored to the event venue."
-            ),
-            "inclusion": [
-                f"Custom {cat_label} focal backdrop arch",
-                "Color-coordinated floral and balloon arrangements",
-                "Curated theme prop accessories and lighting accents",
-                "Professional on-site installation and tear-down crew"
-            ],
-            "faq": [
-                {"question": "Can this styling be set up outdoors?", "answer": "Yes, outdoor setups are supported provided suitable weather protection and anchorage are available."},
-                {"question": "Can color themes and flowers be adjusted?", "answer": "All color palettes and floral arrangements can be customized according to client preference."}
-            ],
-            "note": "Final setup footprint is adaptable based on exact venue dimensions and ceiling clearances.",
-            "keywords": [cat_label.lower(), "event decoration", "party backdrop", "celebration styling", "event design"],
-            "tags": [category or "Decoration", subcategory or "Event", "Premium Styling", "EventDhara Certified"]
         }
 
 

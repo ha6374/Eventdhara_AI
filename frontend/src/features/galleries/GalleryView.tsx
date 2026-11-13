@@ -177,10 +177,10 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
 
   const generateMetaMutation = useMutation({
     mutationFn: (imageId: number) => api.generateMetadata(imageId),
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ['gallery-images'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-overview'] })
-      alert('Metadata generated successfully.')
+      alert(data?.message || 'Metadata generated successfully.')
     },
     onError: (err: any) => {
       alert(err.response?.data?.detail || 'Metadata generation failed')

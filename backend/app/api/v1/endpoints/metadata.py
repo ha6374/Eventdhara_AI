@@ -1,17 +1,29 @@
 import json
+import logging
+import threading
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.image import ImageItem
 from app.models.metadata import ImageMetadata
 from app.schemas.metadata import MetadataResponse, MetadataUpdate
-from app.services.metadata_service import MetadataService
+from app.services.metadata_service import (
+    MetadataService,
+    MetadataError,
+    MetadataNotFoundError,
+    MetadataNotApprovedError,
+    MetadataConcurrencyError,
+    MetadataGenerationError,
+)
+
+logger = logging.getLogger("eventdhara.metadata_endpoint")
 
 router = APIRouter()
+_bulk_lock = threading.Lock()
 
 
-def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
+def serialize_metadata_response(meta: ImageMetadata, message: Optional[str] = None) -> MetadataResponse:
     inclusion = []
     faq = []
     keywords = []
@@ -57,7 +69,11 @@ def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
         orig_filename = meta.image.original_filename
         cat_name = meta.image.category.name if meta.image.category else "Unassigned"
         status = meta.image.status
-        photo_url = meta.image.drive_url or f"https://drive.google.com/file/d/{meta.image.drive_file_id}/view" if meta.image.drive_file_id else f"/{meta.image.storage_path}"
+        photo_url = meta.image.drive_url or (
+            f"https://drive.google.com/file/d/{meta.image.drive_file_id}/view"
+            if meta.image.drive_file_id
+            else f"/{meta.image.storage_path}"
+        )
 
     return MetadataResponse(
         id=meta.id,
@@ -79,7 +95,8 @@ def serialize_metadata_response(meta: ImageMetadata) -> MetadataResponse:
         photo=photo_url,
         category_name=cat_name,
         approval_status=status,
-        processing_status="COMPLETED"
+        processing_status="COMPLETED",
+        message=message
     )
 
 
@@ -100,23 +117,59 @@ def get_image_metadata(image_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/generate/{image_id}", response_model=MetadataResponse)
-def generate_metadata_endpoint(image_id: int, db: Session = Depends(get_db)):
-    """Trigger AI metadata generation for an approved image."""
+def generate_metadata_endpoint(image_id: int, response: Response, db: Session = Depends(get_db)):
+    """
+    Trigger AI metadata generation for an approved image.
+    If metadata is already COMPLETED, skips generation and returns existing metadata.
+    """
     service = MetadataService(db)
-    meta = service.generate_for_image(image_id)
-    if not meta:
-        raise HTTPException(status_code=400, detail="Failed to generate metadata or image is not APPROVED.")
-    return serialize_metadata_response(meta)
+    try:
+        meta, status_code = service.generate_for_image(image_id, force_regenerate=False)
+        if status_code == "ALREADY_COMPLETED":
+            response.headers["X-Metadata-Notice"] = "Metadata already generated"
+            return serialize_metadata_response(meta, message="Metadata already generated")
+        else:
+            return serialize_metadata_response(meta, message="Metadata generated successfully")
+    except MetadataNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MetadataNotApprovedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except MetadataConcurrencyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MetadataGenerationError as e:
+        err_msg = str(e)
+        status_code = 502 if any(q in err_msg.lower() for q in ["429", "quota", "resource_exhausted"]) else 400
+        raise HTTPException(status_code=status_code, detail=err_msg)
+    except Exception as e:
+        logger.error("Unexpected error generating metadata for image #%s: %s", image_id, e)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @router.post("/regenerate/{image_id}", response_model=MetadataResponse)
 def regenerate_metadata_endpoint(image_id: int, db: Session = Depends(get_db)):
-    """Force regenerate AI metadata for an approved image."""
+    """
+    Force regenerate AI metadata for an approved image.
+    Generates fresh metadata from the original image and replaces existing metadata
+    only after Gemini returns valid structured metadata.
+    If Gemini fails, old metadata is preserved.
+    """
     service = MetadataService(db)
-    meta = service.generate_for_image(image_id, force_regenerate=True)
-    if not meta:
-        raise HTTPException(status_code=400, detail="Failed to regenerate metadata.")
-    return serialize_metadata_response(meta)
+    try:
+        meta, status_code = service.generate_for_image(image_id, force_regenerate=True)
+        return serialize_metadata_response(meta, message="Metadata regenerated successfully")
+    except MetadataNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MetadataNotApprovedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except MetadataConcurrencyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MetadataGenerationError as e:
+        err_msg = str(e)
+        status_code = 502 if any(q in err_msg.lower() for q in ["429", "quota", "resource_exhausted"]) else 400
+        raise HTTPException(status_code=status_code, detail=f"Regeneration failed: {err_msg}. Existing metadata was preserved.")
+    except Exception as e:
+        logger.error("Unexpected error regenerating metadata for image #%s: %s", image_id, e)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 @router.put("/{metadata_id}", response_model=MetadataResponse)
@@ -131,25 +184,84 @@ def update_metadata_endpoint(metadata_id: int, payload: MetadataUpdate, db: Sess
 
 @router.post("/bulk-generate")
 def bulk_generate_metadata(db: Session = Depends(get_db)):
-    """Bulk generate metadata for all approved images missing metadata."""
-    pending_images = (
-        db.query(ImageItem)
-        .filter(ImageItem.status == "APPROVED", ImageItem.metadata_status != "COMPLETED")
-        .all()
-    )
-    service = MetadataService(db)
-    completed = 0
-    failed = 0
-    for img in pending_images:
-        res = service.generate_for_image(img.id)
-        if res:
-            completed += 1
-        else:
-            failed += 1
+    """
+    Bulk generate metadata for approved images.
+    - Processes only APPROVED images.
+    - Skips COMPLETED and PROCESSING images.
+    - Retries FAILED and PENDING images.
+    - Never processes the same image twice.
+    - Prevents concurrent bulk jobs.
+    - Handles 429 quota errors by stopping loop and returning remaining count.
+    - Returns accurate progress counts: total, completed, failed, skipped, remaining.
+    """
+    if not _bulk_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A bulk metadata generation job is already in progress. Please wait for it to complete."
+        )
 
-    return {
-        "success": True,
-        "total_pending": len(pending_images),
-        "completed": completed,
-        "failed": failed
-    }
+    try:
+        approved_images = db.query(ImageItem).filter(ImageItem.status == "APPROVED").all()
+
+        total = len(approved_images)
+        completed = 0
+        failed = 0
+        skipped = 0
+        remaining = 0
+
+        # Filter candidates and count skipped
+        candidate_ids = []
+        for img in approved_images:
+            if img.metadata_status == "COMPLETED" and img.metadata_rel is not None:
+                skipped += 1
+            elif img.metadata_status == "PROCESSING":
+                skipped += 1
+            elif img.metadata_status in ("PENDING", "FAILED") or (img.metadata_rel is None):
+                candidate_ids.append(img.id)
+            else:
+                skipped += 1
+
+        # Deduplicate candidate IDs
+        candidate_ids = list(dict.fromkeys(candidate_ids))
+
+        service = MetadataService(db)
+        quota_exceeded = False
+
+        for idx, img_id in enumerate(candidate_ids):
+            if quota_exceeded:
+                remaining += 1
+                continue
+
+            try:
+                meta, status_code = service.generate_for_image(img_id, force_regenerate=False)
+                if status_code == "ALREADY_COMPLETED":
+                    skipped += 1
+                else:
+                    completed += 1
+            except MetadataConcurrencyError:
+                skipped += 1
+            except MetadataGenerationError as gen_err:
+                failed += 1
+                err_text = str(gen_err).lower()
+                if "429" in err_text or "quota" in err_text or "resource_exhausted" in err_text:
+                    logger.error("Gemini API rate/quota limit encountered on image #%s. Halting remaining bulk tasks.", img_id)
+                    quota_exceeded = True
+            except Exception as e:
+                logger.error("Bulk metadata generation error on image #%s: %s", img_id, e)
+                failed += 1
+
+        return {
+            "success": True,
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "remaining": remaining,
+            "message": (
+                "Bulk metadata generation complete."
+                if not quota_exceeded
+                else "Bulk generation stopped due to Gemini API rate/quota limits. Remaining images were not attempted."
+            )
+        }
+    finally:
+        _bulk_lock.release()

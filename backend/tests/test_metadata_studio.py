@@ -1,12 +1,30 @@
 import io
+import json
 import pytest
 from PIL import Image
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 from app.main import app
 from app.core.database import SessionLocal
 from app.models.image import ImageItem
+from app.services.gemini_service import gemini_service
 
 client = TestClient(app)
+
+
+def _mock_gemini_response(name="Grand Wedding Mandap Decor"):
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps({
+        "name": name,
+        "short_description": "Exclusive traditional wedding mandap setup with floral styling.",
+        "long_description": "An opulent celebration setup featuring dense marigold hangings and elegant drapery.",
+        "inclusion": ["Mandap framework", "Floral hangings", "Backdrop draping"],
+        "faq": [{"question": "Is setup included?", "answer": "Yes, complete on-site setup."}],
+        "note": "Requires 12ft cleared area.",
+        "keywords": ["mandap decoration", "traditional decor"],
+        "tags": ["Wedding", "Mandap"]
+    })
+    return mock_resp
 
 
 def test_metadata_generation_editing_and_regeneration():
@@ -33,9 +51,11 @@ def test_metadata_generation_editing_and_regeneration():
     assert app_res.status_code == 200
 
     # 3. Generate AI Metadata
-    gen_res = client.post(f"/api/v1/metadata/generate/{img_id}")
-    assert gen_res.status_code == 200
-    meta = gen_res.json()
+    mock_resp1 = _mock_gemini_response("Grand Wedding Mandap Decor")
+    with patch.object(gemini_service.client.models, "generate_content", return_value=mock_resp1):
+        gen_res = client.post(f"/api/v1/metadata/generate/{img_id}")
+        assert gen_res.status_code == 200
+        meta = gen_res.json()
 
     # Verify all 9 fields exist and are populated
     assert "name" in meta and len(meta["name"]) > 0
@@ -65,11 +85,13 @@ def test_metadata_generation_editing_and_regeneration():
     assert updated_meta["custom_fields"]["Color Theme"] == "Yellow & Marigold"
 
     # 5. Force regenerate metadata
-    regen_res = client.post(f"/api/v1/metadata/regenerate/{img_id}")
-    assert regen_res.status_code == 200
-    regen_meta = regen_res.json()
-    assert regen_meta["id"] == meta_id
-    assert len(regen_meta["name"]) > 0
+    mock_resp2 = _mock_gemini_response("Regenerated Mandap Elegance")
+    with patch.object(gemini_service.client.models, "generate_content", return_value=mock_resp2):
+        regen_res = client.post(f"/api/v1/metadata/regenerate/{img_id}")
+        assert regen_res.status_code == 200
+        regen_meta = regen_res.json()
+        assert regen_meta["id"] == meta_id
+        assert len(regen_meta["name"]) > 0
 
     # 6. Verify GET all metadata includes this record
     all_res = client.get("/api/v1/metadata/all")

@@ -135,6 +135,7 @@ export interface ImageMetadata {
   category_name?: string | null
   approval_status?: string | null
   processing_status?: string | null
+  message?: string | null
 }
 
 export interface DuplicateComparisonItem {

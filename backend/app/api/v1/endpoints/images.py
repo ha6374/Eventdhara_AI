@@ -613,11 +613,30 @@ def bulk_image_action(payload: ImageBulkAction, db: Session = Depends(get_db)):
                     organize_image_in_category_folder(img)
                     success_count += 1
             elif action == "GENERATE_METADATA":
-                if img.status == "APPROVED":
-                    meta_service.generate_for_image(img.id)
-                    success_count += 1
-                else:
+                if img.status != "APPROVED":
                     failed_count += 1
+                    messages.append(f"Image #{img.id} is not APPROVED (status: {img.status}).")
+                elif img.metadata_status == "COMPLETED" and img.metadata_rel is not None:
+                    messages.append(f"Image #{img.id} metadata already completed (skipped).")
+                elif img.metadata_status == "PROCESSING":
+                    messages.append(f"Image #{img.id} metadata currently processing (skipped).")
+                else:
+                    try:
+                        meta_obj, status_code = meta_service.generate_for_image(img.id, force_regenerate=False)
+                        if status_code == "ALREADY_COMPLETED":
+                            messages.append(f"Image #{img.id} metadata already completed (skipped).")
+                        else:
+                            success_count += 1
+                    except Exception as e:
+                        failed_count += 1
+                        err_text = str(e).lower()
+                        messages.append(f"Image #{img.id} metadata failed: {str(e)}")
+                        if "429" in err_text or "quota" in err_text or "resource_exhausted" in err_text:
+                            logger.error("Gemini API quota exceeded in bulk action. Stopping remaining requests.")
+                            unattempted = len(images) - (success_count + failed_count)
+                            if unattempted > 0:
+                                messages.append(f"Bulk action stopped due to Gemini API rate/quota limits. {unattempted} remaining images were not attempted.")
+                            break
             elif action == "UPLOAD_DRIVE":
                 if img.status == "APPROVED":
                     res = drive_service.upload_approved_image(img.id)

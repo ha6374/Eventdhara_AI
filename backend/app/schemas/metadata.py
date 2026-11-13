@@ -52,5 +52,6 @@ class MetadataResponse(BaseModel):
     category_name: Optional[str] = None
     approval_status: Optional[str] = None
     processing_status: Optional[str] = "COMPLETED"
+    message: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)

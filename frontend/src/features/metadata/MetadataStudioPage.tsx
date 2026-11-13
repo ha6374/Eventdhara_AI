@@ -60,10 +60,12 @@ export const MetadataStudioPage: React.FC = () => {
 
   const bulkGenerateMutation = useMutation({
     mutationFn: () => api.bulkGenerateMetadata(),
-    onSuccess: (data) => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ['all-metadata'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-overview'] })
-      alert(`Bulk metadata generation complete: ${data.completed} completed, ${data.failed} failed.`)
+      const skippedMsg = data.skipped !== undefined ? `, ${data.skipped} skipped` : ''
+      const remMsg = data.remaining !== undefined && data.remaining > 0 ? `, ${data.remaining} remaining` : ''
+      alert(`Bulk metadata generation: ${data.completed} completed, ${data.failed} failed${skippedMsg}${remMsg}.\n${data.message || ''}`)
     },
     onError: (err: any) => {
       alert(err.response?.data?.detail || 'Bulk generation failed')
