@@ -23,12 +23,14 @@ interface GoogleSheetsSectionProps {
   onSyncSuccess?: (result: any) => void
   showSyncButton?: boolean
   selectedImageIds?: number[]
+  selectedCategoryId?: number | null
 }
 
 export const GoogleSheetsSection: React.FC<GoogleSheetsSectionProps> = ({
   onSyncSuccess,
   showSyncButton = true,
   selectedImageIds,
+  selectedCategoryId = null,
 }) => {
   const queryClient = useQueryClient()
 
@@ -161,6 +163,7 @@ export const GoogleSheetsSection: React.FC<GoogleSheetsSectionProps> = ({
     mutationFn: () =>
       api.syncMetadataToDynamicSheets({
         image_ids: selectedImageIds && selectedImageIds.length > 0 ? selectedImageIds : undefined,
+        category_id: selectedCategoryId ?? undefined,
       }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['dynamic-sheets-config'] })

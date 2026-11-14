@@ -45,6 +45,28 @@ class GoogleSheetsService:
             logger.exception("Failed to initialize Google Drive client for Sheets.")
             return None
 
+
+    def _get_category_ids_including_descendants(self, category_id: int) -> List[int]:
+        """Return selected category ID and all nested descendant category IDs."""
+        category_ids = {category_id}
+        pending = [category_id]
+
+        while pending:
+            current_id = pending.pop()
+            children = (
+                self.db.query(Category.id)
+                .filter(Category.parent_id == current_id)
+                .all()
+            )
+
+            for row in children:
+                child_id = row[0]
+                if child_id not in category_ids:
+                    category_ids.add(child_id)
+                    pending.append(child_id)
+
+        return list(category_ids)
+
     def export_metadata_to_sheets(
         self,
         category_id: Optional[int] = None,
@@ -58,8 +80,9 @@ class GoogleSheetsService:
         query = self.db.query(ImageItem)
         if status:
             query = query.filter(ImageItem.status == status.upper())
-        if category_id:
-            query = query.filter(ImageItem.category_id == category_id)
+        if category_id is not None:
+            category_ids = self._get_category_ids_including_descendants(category_id)
+            query = query.filter(ImageItem.category_id.in_(category_ids))
 
         images = query.order_by(ImageItem.id.asc()).all()
         if not images:
@@ -167,16 +190,11 @@ class GoogleSheetsService:
         # 2. Upload to Google Drive and convert to native Google Sheet
         drive = self._get_drive_client()
         if not drive:
-            # Save local backup in storage/exports
-            export_path = os.path.join(settings.STORAGE_ROOT, "exports", "EventDhara_GoogleSheets_Export.xlsx")
-            with open(export_path, "wb") as f:
-                f.write(excel_bytes)
             return {
                 "success": False,
-                "status": "LOCAL_SAVED",
-                "message": "Google Drive is unavailable. Excel backup saved locally; Google Sheets export was not completed.",
-                "local_file": export_path,
-                "total_rows": len(rows)
+                "status": "DRIVE_UNAVAILABLE",
+                "message": "Google Drive is unavailable. No local export was created.",
+                "total_rows": 0
             }
 
         try:

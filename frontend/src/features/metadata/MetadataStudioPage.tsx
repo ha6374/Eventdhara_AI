@@ -32,6 +32,9 @@ export const MetadataStudioPage: React.FC = () => {
   const [selectedMeta, setSelectedMeta] = useState<ImageMetadata | null>(null)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [showSheetsConfig, setShowSheetsConfig] = useState(false)
+  const [categorySearch, setCategorySearch] = useState('')
+  const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null)
+  const [selectedMetadataIds, setSelectedMetadataIds] = useState<number[]>([])
 
   // Auto-expand if returning from OAuth callback
   useEffect(() => {
@@ -87,7 +90,7 @@ export const MetadataStudioPage: React.FC = () => {
   })
 
   const exportSheetsMutation = useMutation({
-    mutationFn: () => api.exportToGoogleSheets(undefined, 'APPROVED'),
+    mutationFn: () => api.exportToGoogleSheets(selectedCategoryId ?? undefined, 'APPROVED', 'EventDhara Catalog'),
     onSuccess: (res) => {
       alert(`Published ${res.total_rows} items to Google Sheets!\nSheet URL: ${res.sheet_url}`)
       if (res.sheet_url) {
@@ -113,6 +116,123 @@ export const MetadataStudioPage: React.FC = () => {
     },
   })
 
+  const { data: categoryTree = [] } = useQuery({
+    queryKey: ['metadata-category-tree'],
+    queryFn: () => api.getCategoryTree(),
+  })
+
+  const flattenCategories = (nodes: any[]): any[] =>
+    nodes.flatMap((node) => [
+      node,
+      ...flattenCategories(node.children || []),
+    ])
+
+  const allCategories = flattenCategories(categoryTree)
+
+  const filteredCategories = allCategories.filter((category) =>
+    category.name.toLowerCase().includes(categorySearch.toLowerCase())
+  )
+
+  const {
+    data: categoryMetadata = [],
+    isLoading: categoryMetadataLoading,
+  } = useQuery({
+    queryKey: ['category-metadata', selectedCategoryId],
+    queryFn: () => api.getCategoryMetadata(selectedCategoryId!),
+    enabled: selectedCategoryId !== null,
+  })
+
+  const displayedMetadata = selectedCategoryId !== null
+    ? categoryMetadata
+    : metadataList
+
+  const deleteSingleMutation = useMutation({
+    mutationFn: (metadataId: number) => api.deleteMetadata(metadataId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['all-metadata'] })
+      queryClient.invalidateQueries({ queryKey: ['category-metadata'] })
+      setSelectedMetadataIds([])
+      alert('Metadata deleted successfully.')
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.detail || 'Metadata deletion failed.')
+    },
+  })
+
+  const deleteBulkMutation = useMutation({
+    mutationFn: (ids: number[]) => api.deleteMultipleMetadata(ids),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['all-metadata'] })
+      queryClient.invalidateQueries({ queryKey: ['category-metadata'] })
+      setSelectedMetadataIds([])
+      alert('Selected metadata records deleted successfully.')
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.detail || 'Bulk deletion failed.')
+    },
+  })
+
+  const deleteCategoryMutation = useMutation({
+    mutationFn: (categoryId: number) => api.deleteCategoryMetadata(categoryId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['all-metadata'] })
+      queryClient.invalidateQueries({ queryKey: ['category-metadata'] })
+      setSelectedMetadataIds([])
+      alert('Category metadata deleted successfully.')
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.detail || 'Category metadata deletion failed.')
+    },
+  })
+
+  const handleDeleteSingle = (meta: ImageMetadata) => {
+    const confirmed = window.confirm(
+      `Delete metadata "${meta.name}"?\n\nThe original image will NOT be deleted.`
+    )
+
+    if (confirmed) {
+      deleteSingleMutation.mutate(meta.id)
+    }
+  }
+
+  const handleDeleteSelected = () => {
+    if (selectedMetadataIds.length === 0) {
+      alert('Please select at least one metadata record.')
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${selectedMetadataIds.length} selected metadata records?\n\nOriginal images will NOT be deleted.`
+    )
+
+    if (confirmed) {
+      deleteBulkMutation.mutate(selectedMetadataIds)
+    }
+  }
+
+  const handleDeleteCategory = () => {
+    if (selectedCategoryId === null) return
+
+    const category = allCategories.find(
+      (item) => item.id === selectedCategoryId
+    )
+
+    const confirmed = window.confirm(
+      `Delete ALL metadata for category "${category?.name}"?\n\nOnly metadata records will be deleted. Images and categories will remain safe.`
+    )
+
+    if (confirmed) {
+      deleteCategoryMutation.mutate(selectedCategoryId)
+    }
+  }
+
+  const toggleMetadataSelection = (id: number) => {
+    setSelectedMetadataIds((previous) =>
+      previous.includes(id)
+        ? previous.filter((item) => item !== id)
+        : [...previous, id]
+    )
+  }
   const handleOpenEdit = (meta: ImageMetadata) => {
     setSelectedMeta(meta)
     setEditName(meta.name)
@@ -226,7 +346,7 @@ export const MetadataStudioPage: React.FC = () => {
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
             {showSheetsConfig ? "Hide Sheets Integration" : "Google Sheets Integration"}
           </Button>
-          <a href="/api/v1/reports/export?format=excel&status=APPROVED" download>
+          <a href={selectedCategoryId !== null ? `/api/v1/reports/export?format=excel&status=APPROVED&category_id=${selectedCategoryId}` : "/api/v1/reports/export?format=excel&status=APPROVED"} download>
             <Button variant="outline" size="sm" className="gap-2">
               <Download className="w-4 h-4" />
               Download Excel
@@ -235,10 +355,108 @@ export const MetadataStudioPage: React.FC = () => {
         </div>
       </div>
 
+      {/* Category Search and Metadata Management */}
+      <Card className="p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-800">
+            Category-wise Metadata
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">
+            Search any existing category to view and manage its metadata.
+          </p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="flex-1 space-y-2">
+            <input
+              type="text"
+              value={categorySearch}
+              onChange={(e) => setCategorySearch(e.target.value)}
+              placeholder="Search categories..."
+              className="w-full px-3 py-2 border rounded-lg text-sm"
+            />
+
+            <select
+              value={selectedCategoryId ?? ''}
+              onChange={(e) => {
+                setSelectedCategoryId(
+                  e.target.value ? Number(e.target.value) : null
+                )
+                setSelectedMetadataIds([])
+              }}
+              className="w-full px-3 py-2 border rounded-lg text-sm bg-white"
+            >
+              <option value="">All Categories</option>
+              {filteredCategories.map((category) => (
+                <option key={category.id} value={category.id}>
+                  {category.parent_id == null
+                    ? `📁 MAIN CATEGORY: ${category.name}`
+                    : `${"　".repeat(Math.max(1, category.depth))}↳ SUBCATEGORY: ${category.name}`}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedCategoryId !== null && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDeleteCategory}
+              isLoading={deleteCategoryMutation.isPending}
+              className="gap-2 text-rose-600 border-rose-200 hover:bg-rose-50"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete Category Metadata
+            </Button>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
+          <span className="text-xs text-slate-500">
+            {selectedMetadataIds.length} records selected
+          </span>
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setSelectedMetadataIds(
+                  displayedMetadata.map((item) => item.id)
+                )
+              }}
+              disabled={displayedMetadata.length === 0}
+            >
+              Select All
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setSelectedMetadataIds([])}
+            >
+              Clear Selection
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleDeleteSelected}
+              isLoading={deleteBulkMutation.isPending}
+              disabled={selectedMetadataIds.length === 0}
+              className="gap-2 text-rose-600 border-rose-200"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete Selected
+            </Button>
+          </div>
+        </div>
+      </Card>
       {/* Dynamic Google Sheets Integration Section */}
       {showSheetsConfig && (
         <div className="mb-6">
           <GoogleSheetsSection
+            selectedCategoryId={selectedCategoryId}
             onSyncSuccess={() => {
               refetch()
             }}
@@ -251,9 +469,13 @@ export const MetadataStudioPage: React.FC = () => {
         <div className="flex items-center justify-center p-16 text-slate-400 text-xs">
           Loading catalog metadata records...
         </div>
-      ) : metadataList.length > 0 ? (
+      ) : (selectedCategoryId !== null && categoryMetadataLoading) ? (
+        <div className="p-12 text-center text-slate-400 text-xs">
+          Loading category metadata...
+        </div>
+      ) : displayedMetadata.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {metadataList.map((meta) => (
+          {displayedMetadata.map((meta) => (
             <Card key={meta.id} className="flex flex-col justify-between hover:border-slate-300 transition-all shadow-xs">
               <div>
                 <CardHeader className="p-4 border-b bg-slate-50/50 flex-row items-center justify-between">
@@ -262,10 +484,28 @@ export const MetadataStudioPage: React.FC = () => {
                       {meta.name}
                     </span>
                     <span className="text-[10px] text-slate-400 truncate block">
-                      Category: {meta.category_name || 'Unassigned'} • Photo: {meta.original_filename || `#${meta.image_id}`}
+                      Category: {meta.category_name || 'Unassigned'} â€¢ Photo: {meta.original_filename || `#${meta.image_id}`}
                     </span>
                   </div>
                   <div className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={selectedMetadataIds.includes(meta.id)}
+                      onChange={() => toggleMetadataSelection(meta.id)}
+                      className="w-4 h-4 accent-blue-600 cursor-pointer"
+                      title="Select metadata"
+                    />
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDeleteSingle(meta)}
+                      isLoading={deleteSingleMutation.isPending}
+                      className="p-1 h-7 text-rose-500 hover:text-rose-700"
+                      title="Delete Metadata"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -348,7 +588,7 @@ export const MetadataStudioPage: React.FC = () => {
               <div className="p-3 border-t border-slate-100 bg-slate-50/30 flex items-center justify-between text-[10px] text-slate-400">
                 <span>Updated: {formatDate(meta.updated_at)}</span>
                 <span className="text-blue-600 font-semibold cursor-pointer" onClick={() => handleOpenEdit(meta)}>
-                  View Full 9 Fields & Edit →
+                  View Full 9 Fields & Edit â†’
                 </span>
               </div>
             </Card>

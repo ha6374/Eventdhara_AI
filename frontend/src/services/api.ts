@@ -178,6 +178,27 @@ export const api = {
     return res.data
   },
 
+  async getCategoryMetadata(categoryId: number): Promise<ImageMetadata[]> {
+    const res = await apiClient.get<ImageMetadata[]>(`/metadata/category/${categoryId}`)
+    return res.data
+  },
+
+  async deleteMetadata(metadataId: number) {
+    const res = await apiClient.delete(`/metadata/delete/${metadataId}`)
+    return res.data
+  },
+
+  async deleteMultipleMetadata(metadataIds: number[]) {
+    const res = await apiClient.post('/metadata/delete/bulk', {
+      metadata_ids: metadataIds,
+    })
+    return res.data
+  },
+
+  async deleteCategoryMetadata(categoryId: number) {
+    const res = await apiClient.delete(`/metadata/category/${categoryId}`)
+    return res.data
+  },
   async bulkGenerateMetadata() {
     const res = await apiClient.post('/metadata/bulk-generate')
     return res.data
@@ -305,6 +326,3 @@ export const api = {
     return res.data
   },
 }
-
-
-

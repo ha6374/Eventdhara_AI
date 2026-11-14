@@ -42,6 +42,8 @@ interface GalleryViewProps {
 const PREDEFINED_REASONS = [
   'Blurry Image',
   'Poor Image Quality',
+  "Background Isn't Good",
+  'Wrong Angle',
   'Wrong Category',
   'Duplicate Image',
   'Screenshot',
@@ -586,13 +588,13 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
                       {item.original_filename}
                     </button>
                   </td>
-                  <td className="p-3 text-slate-600">{item.category_name || 'â€”'}</td>
+                  <td className="p-3 text-slate-600">{item.category_name || 'Ã¢â‚¬â€'}</td>
                   <td className="p-3 font-mono">{item.width}x{item.height}</td>
                   <td className="p-3 font-mono">
-                    {item.blur_score ? item.blur_score.toFixed(1) : 'â€”'}
+                    {item.blur_score ? item.blur_score.toFixed(1) : 'Ã¢â‚¬â€'}
                   </td>
                   <td className="p-3 max-w-xs truncate text-[11px] text-slate-500">
-                    {item.rejection_reason || item.review_reason || 'â€”'}
+                    {item.rejection_reason || item.review_reason || 'Ã¢â‚¬â€'}
                   </td>
                   <td className="p-3 text-right space-x-1.5">
                     {status !== 'APPROVED' && (
@@ -676,7 +678,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
 
             <div className="flex items-center gap-2">
               <span className="hidden md:inline text-[11px] text-slate-400">
-                Shortcuts: â† Prev | â†’ Next | Del Delete | Esc Close
+                Shortcuts: Ã¢â€ Â Prev | Ã¢â€ â€™ Next | Del Delete | Esc Close
               </span>
               <button
                 onClick={() => setViewerActiveIndex(null)}
@@ -726,7 +728,7 @@ export const GalleryView: React.FC<GalleryViewProps> = ({ status, title, descrip
             <div className="flex flex-wrap items-center gap-4 text-slate-300">
               <span>Category: <strong className="text-white">{activeImage.category_name || 'Unassigned'}</strong></span>
               <span>Dimensions: <strong className="text-white">{activeImage.width}x{activeImage.height}</strong></span>
-              <span>Blur Score: <strong className="text-white">{activeImage.blur_score ? activeImage.blur_score.toFixed(1) : 'â€”'}</strong></span>
+              <span>Blur Score: <strong className="text-white">{activeImage.blur_score ? activeImage.blur_score.toFixed(1) : 'Ã¢â‚¬â€'}</strong></span>
               {activeImage.rejection_reason && (
                 <span className="text-rose-300 font-medium truncate max-w-md">
                   Reason: {activeImage.rejection_reason}

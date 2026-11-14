@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Body
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models.image import ImageItem
@@ -106,6 +106,86 @@ def get_all_metadata(db: Session = Depends(get_db)):
     records = db.query(ImageMetadata).order_by(ImageMetadata.updated_at.desc()).all()
     return [serialize_metadata_response(r) for r in records]
 
+
+
+@router.get("/category/{category_id}", response_model=List[MetadataResponse])
+def get_category_metadata(category_id: int, db: Session = Depends(get_db)):
+    """Fetch metadata records belonging to a specific category."""
+    category_ids = MetadataService(db)._get_category_ids_including_descendants(category_id)
+
+    records = (
+        db.query(ImageMetadata)
+        .join(ImageItem, ImageMetadata.image_id == ImageItem.id)
+        .filter(ImageItem.category_id.in_(category_ids))
+        .order_by(ImageMetadata.updated_at.desc())
+        .all()
+    )
+    return [serialize_metadata_response(r) for r in records]
+
+
+@router.delete("/delete/{metadata_id}")
+def delete_single_metadata(metadata_id: int, db: Session = Depends(get_db)):
+    """Delete one metadata record only. Original image remains safe."""
+    service = MetadataService(db)
+
+    try:
+        deleted = service.delete_metadata(metadata_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Metadata record not found")
+
+        return {
+            "success": True,
+            "deleted_count": 1,
+            "message": "Metadata deleted successfully. Original image was preserved."
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Single metadata deletion failed")
+        raise HTTPException(status_code=500, detail="Metadata deletion failed")
+
+
+@router.post("/delete/bulk")
+def delete_multiple_metadata(
+    metadata_ids: List[int] = Body(..., embed=True),
+    db: Session = Depends(get_db)
+):
+    """Delete selected metadata records only."""
+    if not metadata_ids:
+        raise HTTPException(status_code=400, detail="Select at least one metadata record")
+
+    if any(metadata_id <= 0 for metadata_id in metadata_ids):
+        raise HTTPException(status_code=400, detail="Invalid metadata ID")
+
+    try:
+        deleted_count = MetadataService(db).delete_multiple_metadata(metadata_ids)
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"{deleted_count} metadata records deleted. Original images were preserved."
+        }
+    except Exception:
+        logger.exception("Bulk metadata deletion failed")
+        raise HTTPException(status_code=500, detail="Bulk metadata deletion failed")
+
+
+@router.delete("/category/{category_id}")
+def delete_category_metadata(category_id: int, db: Session = Depends(get_db)):
+    """Delete metadata for a category without deleting its images or category."""
+    if category_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid category ID")
+
+    try:
+        deleted_count = MetadataService(db).delete_category_metadata(category_id)
+        return {
+            "success": True,
+            "category_id": category_id,
+            "deleted_count": deleted_count,
+            "message": f"{deleted_count} metadata records deleted. Images and category were preserved."
+        }
+    except Exception:
+        logger.exception("Category metadata deletion failed")
+        raise HTTPException(status_code=500, detail="Category metadata deletion failed")
 
 @router.get("/{image_id}", response_model=MetadataResponse)
 def get_image_metadata(image_id: int, db: Session = Depends(get_db)):

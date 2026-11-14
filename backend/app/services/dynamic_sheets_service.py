@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.security import encrypt_token, decrypt_token
 from app.models.sheets_config import GoogleSheetsConfig
 from app.models.image import ImageItem
+from app.models.category import Category
 from app.models.metadata import ImageMetadata
 from app.models.audit import AuditLog
 
@@ -548,6 +549,28 @@ class DynamicGoogleSheetsService:
             logger.warning("Could not read existing rows for de-duplication: %s", e)
             return set()
 
+
+    def _get_category_ids_including_descendants(self, category_id: int) -> List[int]:
+        """Return selected category ID and all nested descendant category IDs."""
+        category_ids = {category_id}
+        pending = [category_id]
+
+        while pending:
+            current_id = pending.pop()
+            children = (
+                self.db.query(Category.id)
+                .filter(Category.parent_id == current_id)
+                .all()
+            )
+
+            for row in children:
+                child_id = row[0]
+                if child_id not in category_ids:
+                    category_ids.add(child_id)
+                    pending.append(child_id)
+
+        return list(category_ids)
+
     def append_metadata(
         self,
         image_ids: Optional[List[int]] = None,
@@ -574,8 +597,9 @@ class DynamicGoogleSheetsService:
         query = self.db.query(ImageMetadata).join(ImageItem, ImageMetadata.image_id == ImageItem.id)
         if image_ids:
             query = query.filter(ImageMetadata.image_id.in_(image_ids))
-        if category_id:
-            query = query.filter(ImageItem.category_id == category_id)
+        if category_id is not None:
+            category_ids = self._get_category_ids_including_descendants(category_id)
+            query = query.filter(ImageItem.category_id.in_(category_ids))
 
         meta_records = query.order_by(ImageMetadata.id.asc()).all()
         if not meta_records:

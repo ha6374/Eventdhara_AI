@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from app.models.image import ImageItem
+from app.models.category import Category
 from app.models.metadata import ImageMetadata
 from app.models.audit import AuditLog
 from app.schemas.metadata import MetadataCreate, MetadataUpdate
@@ -260,3 +261,105 @@ class MetadataService:
         self.db.commit()
 
         return meta_obj
+
+    def _get_category_ids_including_descendants(self, category_id: int) -> List[int]:
+        """Get selected category and all nested subcategory IDs."""
+        category_ids = {category_id}
+        pending = [category_id]
+
+        while pending:
+            current_id = pending.pop()
+            children = (
+                self.db.query(Category.id)
+                .filter(Category.parent_id == current_id)
+                .all()
+            )
+
+            for row in children:
+                child_id = row[0]
+                if child_id not in category_ids:
+                    category_ids.add(child_id)
+                    pending.append(child_id)
+
+        return list(category_ids)
+
+    def _delete_metadata_records(self, records: List[ImageMetadata], action: str, details: str) -> int:
+        """Delete metadata rows only. Preserve original images and categories."""
+        if not records:
+            return 0
+
+        deleted_count = len(records)
+
+        try:
+            for meta in records:
+                image = self.db.query(ImageItem).filter(
+                    ImageItem.id == meta.image_id
+                ).first()
+
+                if image:
+                    image.metadata_status = "PENDING"
+
+                self.db.add(AuditLog(
+                    action=action,
+                    image_id=meta.image_id,
+                    details=f"{details} Metadata ID: {meta.id}"
+                ))
+
+                self.db.delete(meta)
+
+            self.db.commit()
+            return deleted_count
+
+        except Exception:
+            self.db.rollback()
+            logger.exception("Metadata deletion failed")
+            raise
+
+    def delete_metadata(self, metadata_id: int) -> bool:
+        """Delete one metadata record without deleting its image."""
+        meta = self.db.query(ImageMetadata).filter(
+            ImageMetadata.id == metadata_id
+        ).first()
+
+        if not meta:
+            return False
+
+        self._delete_metadata_records(
+            [meta],
+            "DELETE_METADATA",
+            "Single metadata record deleted."
+        )
+        return True
+
+    def delete_multiple_metadata(self, metadata_ids: List[int]) -> int:
+        """Delete selected metadata records only."""
+        unique_ids = list(dict.fromkeys(metadata_ids))
+
+        if not unique_ids:
+            return 0
+
+        records = self.db.query(ImageMetadata).filter(
+            ImageMetadata.id.in_(unique_ids)
+        ).all()
+
+        return self._delete_metadata_records(
+            records,
+            "BULK_DELETE_METADATA",
+            "Selected metadata record deleted."
+        )
+
+    def delete_category_metadata(self, category_id: int) -> int:
+        """Delete metadata belonging to a category and its descendants."""
+        category_ids = self._get_category_ids_including_descendants(category_id)
+        records = (
+            self.db.query(ImageMetadata)
+            .join(ImageItem, ImageMetadata.image_id == ImageItem.id)
+            .filter(ImageItem.category_id.in_(category_ids))
+            .all()
+        )
+
+        return self._delete_metadata_records(
+            records,
+            "CATEGORY_DELETE_METADATA",
+            f"Metadata deleted for category ID {category_id}."
+        )

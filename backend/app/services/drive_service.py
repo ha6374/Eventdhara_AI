@@ -373,34 +373,47 @@ class GoogleDriveService:
             return {"success": False, "message": f"Google Drive API error: {err_msg}"}
 
     def download_image_bytes(self, drive_file_id: str) -> Tuple[Optional[bytes], Optional[str]]:
-        """
-        Fetches raw image bytes and mime type for private Google Drive file using authenticated Drive client.
-        Preserves Drive file privacy without redirecting to webViewLink or making files public.
-        """
-        drive = self._get_drive_client()
-        if not drive:
-            logger.error("Authenticated Drive client unavailable for downloading file %s", drive_file_id)
-            return None, None
+        """Download a private Google Drive image using authenticated credentials."""
+        if not drive_file_id:
+            raise ValueError("Google Drive file ID is missing.")
 
         try:
+            drive = self._get_drive_client()
+            if not drive:
+                raise RuntimeError("Authenticated Google Drive client is unavailable.")
+
             import io
             from googleapiclient.http import MediaIoBaseDownload
 
-            file_meta = drive.files().get(fileId=drive_file_id, fields="mimeType").execute()
-            mime_type = file_meta.get("mimeType", "image/jpeg")
+            file_meta = drive.files().get(
+                fileId=drive_file_id,
+                fields="mimeType,trashed"
+            ).execute()
+
+            if file_meta.get("trashed"):
+                raise RuntimeError("Google Drive image is in the trash.")
+
+            mime_type = file_meta.get("mimeType", "")
+            if not mime_type.startswith("image/"):
+                raise ValueError(f"Google Drive file is not an image: {mime_type}")
 
             request = drive.files().get_media(fileId=drive_file_id)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, request)
+
             done = False
             while not done:
-                status, done = downloader.next_chunk()
+                _, done = downloader.next_chunk()
 
-            return fh.getvalue(), mime_type
+            image_bytes = fh.getvalue()
+            if not image_bytes:
+                raise RuntimeError("Google Drive returned an empty image.")
 
-        except Exception as e:
-            logger.error("Error downloading file %s from Google Drive: %s", drive_file_id, e)
-            return None, None
+            return image_bytes, mime_type
+
+        except Exception:
+            logger.exception("Google Drive image download failed for file ID %s", drive_file_id)
+            raise
 
     def get_drive_folder_hierarchy(self) -> List[Dict[str, Any]]:
         """

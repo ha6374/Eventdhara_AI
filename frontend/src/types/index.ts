@@ -132,6 +132,7 @@ export interface ImageMetadata {
   original_filename?: string | null
   image_url?: string | null
   photo?: string | null
+  category_id?: number | null
   category_name?: string | null
   approval_status?: string | null
   processing_status?: string | null
